@@ -7,57 +7,138 @@ from os import mkdir
 from key_controller import *
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QFileDialog, QTextEdit, QVBoxLayout, QWidget, \
-    QHBoxLayout, QLabel, QGridLayout
-from PyQt6.QtGui import QColor
+    QHBoxLayout, QLabel, QGridLayout, QTreeView, QMessageBox
+from PyQt6.QtGui import QColor, QFileSystemModel
+
 
 class FileDialogExample(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.initUI()
-        self.selected_directory = os.path.join(os.path.join(os.path.expanduser('~')), r"Desktop\Zdjecia360")
+        self.selected_path = ""
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        self.target_folder = os.path.join(desktop, "Zdjecia360")
+        # Create folder if it doesn't exist
+        if not os.path.exists(self.target_folder):
+            os.makedirs(self.target_folder)
 
+        self.initUI()
 
     def initUI(self):
-        self.setWindowTitle("Stock Status Generator")
-        self.setGeometry(100, 100, 500, 400)
+        self.setWindowTitle('360 Photos Explorer')
+        self.setGeometry(100, 100, 800, 600)
 
-        layout = QVBoxLayout()
+        # Central widget and layout
+        central_widget = QWidget()
 
-        # self.directory_label = QLabel("Directory: NOT SELECTED!", self)
-        # self.directory_label.setStyleSheet("color: red;")
-        # layout.addWidget(self.directory_label)
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
 
-        self.text_edit = QTextEdit(self)
-        self.text_edit.setReadOnly(True)
-        layout.addWidget(self.text_edit)
+        # Label showing current directory
+        self.current_dir_label = QLabel(f"Current Directory: {self.target_folder}")
+        layout.addWidget(self.current_dir_label)
+
+        # Tree view for file system
+        self.tree_view = QTreeView()
+        self.model = QFileSystemModel()
+        self.model.setRootPath(self.target_folder)
+        self.tree_view.setModel(self.model)
+        self.tree_view.setRootIndex(self.model.index(self.target_folder))
+        self.tree_view.setSelectionMode(QTreeView.SelectionMode.SingleSelection)
+        self.tree_view.selectionModel().selectionChanged.connect(self.validate_selection)
+        self.tree_view.doubleClicked.connect(self.on_item_double_clicked)
+        layout.addWidget(self.tree_view)
 
         button_layout = QGridLayout()
-
-        self.button = QPushButton("Open Files", self)
+        #
+        self.button = QPushButton("Select update file", self)
         self.button.setFixedSize(250, 50)
         self.button.clicked.connect(self.openFileDialog)
-        button_layout.addWidget(self.button, 0, 0)
+        button_layout.addWidget(self.button, 0, 1)
 
-        self.copy_button = QPushButton("Copy to Clipboard", self)
+        self.select_button = QPushButton("Setup 360 Rig", self)
+        # self.select_button.setEnabled(False)
+        self.select_button.setFixedSize(250, 50)
+        # keyboard.add_hotkey('ctrl+home', setup(selected=self.selected))
+        self.select_button.clicked.connect(self.setApp)
+        button_layout.addWidget(self.select_button, 0, 0)
+
+        self.copy_button = QPushButton("Select Directory")
+        self.copy_button.setEnabled(False)  # Disabled by default
         self.copy_button.setFixedSize(250, 50)
-        self.copy_button.clicked.connect(self.copy_to_clipboard)
-        button_layout.addWidget(self.copy_button, 0, 1)
+        self.copy_button.clicked.connect(self.copy_selected_name)
+        button_layout.addWidget(self.copy_button, 1, 0)
 
-        self.select_directory_button = QPushButton("Start", self)
-        self.select_directory_button.setFixedSize(250, 50)
-        self.select_directory_button.clicked.connect(click_first())
-        button_layout.addWidget(self.select_directory_button, 1, 0)
-
-        self.create_folders_button = QPushButton("Reset", self)
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.refresh_view)
+        self.refresh_button.setFixedSize(250, 50)
+        button_layout.addWidget(self.refresh_button, 1, 1)
+        #
+        self.create_folders_button = QPushButton("Set", self)
         self.create_folders_button.setFixedSize(250, 50)
-        self.create_folders_button.clicked.connect(click_second())
-        button_layout.addWidget(self.create_folders_button, 1, 1)
+        self.create_folders_button.clicked.connect(click_first)
+        button_layout.addWidget(self.create_folders_button, 2, 0)
 
+        self.create_folders_button = QPushButton("Start", self)
+        self.create_folders_button.setFixedSize(250, 50)
+        self.create_folders_button.clicked.connect(click_second)
+        button_layout.addWidget(self.create_folders_button, 2, 1)
+        #
         layout.addLayout(button_layout)
-
+        #
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+    def setApp(self):
+        self.select_button.setEnabled(False)
+        setup()
+    def validate_selection(self):
+        selected = self.tree_view.selectedIndexes()
+        if not selected:
+            self.copy_button.setEnabled(False)
+            # self.select_button.setEnabled(False)
+            return
+
+        index = selected[0]
+        path = self.model.filePath(index)
+
+        is_valid = False
+        if os.path.isfile(path):
+            is_valid = True
+        elif os.path.isdir(path):
+            has_subfolders = any(
+                os.path.isdir(os.path.join(path, item))
+                for item in os.listdir(path)
+            )
+            is_valid = not has_subfolders
+
+        self.copy_button.setEnabled(is_valid)
+
+    def on_item_double_clicked(self, index):
+        path = self.model.filePath(index)
+        if os.path.isfile(path):
+            try:
+                os.startfile(path)
+            except:
+                QMessageBox.information(self, "Info", f"Would open: {path}")
+
+    def copy_selected_name(self):
+        selected = self.tree_view.selectedIndexes()
+        # print(selected)
+        if not selected:
+            return
+
+        name = self.model.filePath(selected[0])
+        self.selected_path = os.path.join(self.target_folder, name)
+        print(self.selected_path)
+        self.selected_path = self.selected_path.replace("C:/Users/Cinek/Desktop/Zdjecia360/", "")
+        open_file(self.selected_path)
+        # QApplication.clipboard().setText(name)
+        # QMessageBox.information(self, "Copied", f"Copied: {name}")
+
+    def refresh_view(self):
+        self.model.setRootPath(self.target_folder)
+        self.tree_view.setRootIndex(self.model.index(self.target_folder))
+        self.current_dir_label.setText(f"Current Directory: {self.target_folder}")
 
     def copy_to_clipboard(self):
         clipboard = QApplication.clipboard()
@@ -176,7 +257,7 @@ class FileDialogExample(QMainWindow):
                                     param = False
 
                                 if not param and status:
-                                    parent_directory = self.selected_directory
+                                    parent_directory = self.target_folder
                                     directory_name = name
                                     full_path = os.path.join(parent_directory, type, producer, directory_name)
 
@@ -223,12 +304,14 @@ class FileDialogExample(QMainWindow):
 
             self.text_edit.setText(output_text)
 def main():
-    keyboard.add_hotkey('f13', click_first)
-    keyboard.add_hotkey('f14', click_second)
-    keyboard.add_hotkey('home', setup)
+
     app = QApplication(sys.argv)
     window = FileDialogExample()
     window.show()
+    keyboard.add_hotkey('f13', click_first)
+    keyboard.add_hotkey('f14', click_second)
+
+
     sys.exit(app.exec())
 
 

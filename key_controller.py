@@ -24,19 +24,43 @@ windows_obs = os.path.join(script_dir, 'photos', 'windows_obs.jpg')
 obs_right_click = os.path.join(script_dir, 'photos', 'obs_right_click.jpg')
 obs_full_screen = os.path.join(script_dir, 'photos', 'obs_full_screen.jpg')
 obs_select_screen = os.path.join(script_dir, 'photos', 'obs_select_screen.jpg')
-def find_and_click():
+folder_finder = os.path.join(script_dir, 'photos', 'folder_finder.jpg')
+set_folder = os.path.join(script_dir, 'photos', 'set_folder.jpg')
+def find_and_click(selected):
     try:
         print("Szukam obrazu open.jpg na ekranie...")
-        button_location = pyautogui.locateOnScreen(open, confidence=0.8)
+        button_location = pyautogui.locateOnScreen(open, confidence=0.75)
+        finder_location = pyautogui.locateOnScreen(folder_finder, confidence=0.9)
         if button_location:
             pyautogui.click(pyautogui.center(button_location))
             print("Kliknięto w znaleziony obraz open.jpg.")
+            pyautogui.click(pyautogui.center(finder_location))
+            keyboard.wait('')
             check_for_path_image()
 
         else:
             print("Nie znaleziono obrazu open.jpg.")
     except Exception as e:
         print(f"Błąd w find_and_click: {e}")
+
+def open_file(selected):
+    try:
+        images = [open, folder_finder]
+        for image_path in images:
+            print(f"Szukam obrazu {os.path.basename(image_path)}...")
+            image_location = pyautogui.locateOnScreen(image_path, confidence=0.8)
+            if image_location:
+                pyautogui.click(pyautogui.center(image_location))
+                print(f"Kliknięto w obraz {os.path.basename(image_path)}.")
+            else:
+                print(f"Nie znaleziono obrazu {os.path.basename(image_path)}.")
+            time.sleep(1)
+        keyboard.write(selected)
+        keyboard.press('enter')
+        setf = pyautogui.locateOnScreen(set_folder, confidence=0.8)
+        pyautogui.click(pyautogui.center(setf))
+    except Exception as e:
+        print(f"Błąd w click_first: {e}")
 
 def check_for_path_image():
     print("Sprawdzam obecność path.jpg...")
@@ -82,17 +106,18 @@ def click_second():
 
 def setup():
     try:
-        #           0       1           2       3               4           5              6                7          8                9               10                  11
-        images = [windows_search, setup_start, number, setup_table, setup_camera, fullscreen, windows_search, windows_obs, obs_right_click, obs_full_screen, obs_select_screen, minimalize]
+    #                    0          1             2         3              4           5              6                7          8                9               10                  11
+        images = [windows_search, setup_start, number, setup_table, setup_camera, fullscreen, windows_search, obs_right_click, obs_full_screen, obs_select_screen, minimalize]
         count = 0
         for image_path in images:
             print(image_path)
             print(f"Szukam obrazu {os.path.basename(image_path)}...")
-            image_location = pyautogui.locateOnScreen(image_path, confidence=0.8)
+            image_location = pyautogui.locateOnScreen(image_path, confidence=0.9)
             if image_location:
                 if count == 0:
                     # pyautogui.doubleClick(pyautogui.center(image_location))
                     # print(f"Double Kliknięto w obraz {os.path.basename(image_path)}.")
+                    print("?")
                     pyautogui.click(pyautogui.center(image_location))
                     pyautogui.write("Object")
                     keyboard.press("Enter")
@@ -101,13 +126,14 @@ def setup():
                     print(f"Double Kliknięto w obraz {os.path.basename(image_path)}.")
                     pyautogui.press('2')
                     pyautogui.press('0')
-                elif count == 7:
+                elif count == 6:
                     pyautogui.click(pyautogui.center(image_location))
                     print(f"czekam na obs")
-                    time.sleep(3)
-                elif count == 8:
                     pyautogui.write("Obs")
                     keyboard.press("Enter")
+                    time.sleep(3)
+                elif count == 7:
+                    pyautogui.rightClick(pyautogui.center(image_location))
 
                 else:
                     pyautogui.click(pyautogui.center(image_location))
@@ -117,13 +143,13 @@ def setup():
             time.sleep(0.35)
             count+=1
         time.sleep(2)
-        find_and_click()
+
     except Exception as e:
-        print(f"Błąd w click_second: {e}")
+        print(f"Błąd w setup: {e}")
 
-keyboard.add_hotkey('f13', click_first)
-keyboard.add_hotkey('f14', click_second)
-keyboard.add_hotkey('home', setup)
-
-print("Czekam na wciśnięcie klawiszy F13 lub F14... ")
-keyboard.wait('f15')
+# keyboard.add_hotkey('f13', click_first)
+# keyboard.add_hotkey('f14', click_second)
+# keyboard.add_hotkey('home', setup)
+#
+# print("Czekam na wciśnięcie klawiszy F13 lub F14... ")
+# keyboard.wait('f15')
