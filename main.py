@@ -62,56 +62,64 @@ class FileDialogExample(QMainWindow):
         self.select_button.clicked.connect(self.setApp)
         button_layout.addWidget(self.select_button, 0, 0)
 
-        self.copy_button = QPushButton("Select Directory")
-        self.copy_button.setEnabled(False)  # Disabled by default
-        self.copy_button.setFixedSize(250, 50)
-        self.copy_button.clicked.connect(self.copy_selected_name)
-        button_layout.addWidget(self.copy_button, 1, 0)
+        # self.copy_button = QPushButton("Select Directory")
+        # self.copy_button.setEnabled(False)  # Disabled by default
+        # self.copy_button.setFixedSize(250, 50)
+        # self.copy_button.clicked.connect(self.copy_selected_name)
+        # button_layout.addWidget(self.copy_button, 1, 0)
 
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_view)
         self.refresh_button.setFixedSize(250, 50)
         button_layout.addWidget(self.refresh_button, 1, 1)
         #
-        self.create_folders_button = QPushButton("Set", self)
-        self.create_folders_button.setFixedSize(250, 50)
-        self.create_folders_button.clicked.connect(click_first)
-        button_layout.addWidget(self.create_folders_button, 2, 0)
+        self.first_click_button = QPushButton("Setup Camera", self)
+        self.first_click_button.setFixedSize(250, 50)
+        self.first_click_button.clicked.connect(self.setup_camera)
+        self.first_click_button.setEnabled(False)
+        button_layout.addWidget(self.first_click_button, 2, 0)
 
-        self.create_folders_button = QPushButton("Start", self)
-        self.create_folders_button.setFixedSize(250, 50)
-        self.create_folders_button.clicked.connect(click_second)
-        button_layout.addWidget(self.create_folders_button, 2, 1)
+        self.start_button = QPushButton("Start", self)
+        self.start_button.setEnabled(False)
+        self.start_button.setFixedSize(250, 50)
+        self.start_button.clicked.connect(self.start_machine)
+        button_layout.addWidget(self.start_button, 2, 1)
         #
         layout.addLayout(button_layout)
         #
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+    def start_machine(self):
+        click_second()
+        self.start_button.setEnabled(False)
+
+    def setup_camera(self):
+        click_first(path=os.path.join(self.target_folder, self.model.filePath(self.tree_view.selectedIndexes()[0])))
+        self.start_button.setEnabled(True)
+        self.first_click_button.setEnabled(False)
     def setApp(self):
         self.select_button.setEnabled(False)
         setup()
     def validate_selection(self):
         selected = self.tree_view.selectedIndexes()
         if not selected:
-            self.copy_button.setEnabled(False)
+            self.first_click_button.setEnabled(False)
             # self.select_button.setEnabled(False)
             return
-
+        #
         index = selected[0]
         path = self.model.filePath(index)
 
         is_valid = False
-        if os.path.isfile(path):
-            is_valid = True
-        elif os.path.isdir(path):
+        if os.path.isdir(path) and not self.select_button.isEnabled():
             has_subfolders = any(
                 os.path.isdir(os.path.join(path, item))
                 for item in os.listdir(path)
             )
             is_valid = not has_subfolders
 
-        self.copy_button.setEnabled(is_valid)
+        self.first_click_button.setEnabled(is_valid)
 
     def on_item_double_clicked(self, index):
         path = self.model.filePath(index)
@@ -130,8 +138,8 @@ class FileDialogExample(QMainWindow):
         name = self.model.filePath(selected[0])
         self.selected_path = os.path.join(self.target_folder, name)
         print(self.selected_path)
-        self.selected_path = self.selected_path.replace("C:/Users/Cinek/Desktop/Zdjecia360/", "")
-        open_file(self.selected_path)
+        # self.selected_path = self.selected_path.replace("C:/Users/Cinek/Desktop/Zdjecia360/", "")
+        # open_file(self.selected_path)
         # QApplication.clipboard().setText(name)
         # QMessageBox.information(self, "Copied", f"Copied: {name}")
 
@@ -303,6 +311,7 @@ class FileDialogExample(QMainWindow):
                 print(f"Data has been saved to '{output_file}'.\n")
 
             self.text_edit.setText(output_text)
+
 def main():
 
     app = QApplication(sys.argv)
