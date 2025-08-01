@@ -9,6 +9,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+import json
 
 # Configuration
 WEBSITE_URL = "https://defender.iai-shop.com/panel/cms-files.php"
@@ -212,7 +213,10 @@ def main():
                 if files:
                     filename = os.path.splitext(files[0])[0]  # Get filename without extension
                     print(f"\nProcessing product: {folder} (File: {filename})")
-                    product_link = process_product(driver, folder, filename)
+                    with open(folder_path+"/data.json", 'r') as file:
+                        data = json.load(file)
+
+                    product_link = process_product(driver, data["id"], filename)
 
                     if product_link:
                         print(f"Successfully processed: {product_link}")

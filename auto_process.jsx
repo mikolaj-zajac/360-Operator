@@ -2,10 +2,17 @@
 var ACTION_NAME = "Wycięcie Buty";
 var ACTION_SET = "Buty.atn";
 var OUTPUT_FORMAT = "PNG"; // Zapisz jako PNG
+var mainFolder = null; // Declare globally
+
 
 // ===== GŁÓWNA FUNKCJA ===== //
 function main() {
-    var mainFolder = Folder.selectDialog("Wybierz folder GŁÓWNY");
+    var pathFile = File("C:/Users/Cinek/PycharmProjects/360-Operator/folder_path.txt");
+    pathFile.open("r");
+    var folderPath = pathFile.read();
+    pathFile.close();
+    var mainFolder = new Folder(folderPath);
+
     if (!mainFolder) return;
 
     var totalProcessed = processAllSubfolders(mainFolder);
@@ -68,3 +75,27 @@ function isImageFile(file) {
 
 // ===== URUCHOMIENIE ===== //
 main();
+var pathFile = File("C:/Users/Cinek/PycharmProjects/360-Operator/folder_path.txt");
+pathFile.open("r");
+var folderPath = pathFile.read();
+pathFile.close();
+var mainFolder = new Folder(folderPath);
+var outputFolder = new Folder(mainFolder + "/" + OUTPUT_FORMAT + " Files");
+
+if (outputFolder.exists) {
+    var pngs = outputFolder.getFiles("*.png");
+    alert("Znaleziono plików PNG: " + pngs.length);
+
+    for (var i = 0; i < pngs.length; i++) {
+        app.open(pngs[i]);
+    }
+} else {
+    alert("Folder nie istnieje: " + outputFolder.fsName);
+}
+
+if (outputFolder.exists) {
+    var pngs = outputFolder.getFiles("*.png");
+    for (var i = 0; i < pngs.length; i++) {
+        app.open(pngs[i]);
+    }
+}

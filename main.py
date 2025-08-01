@@ -1,10 +1,14 @@
 import json
+import subprocess
 import sys
 import os
 import csv
 from os import mkdir
 
-from key_controller import *
+from pymsgbox import alert
+
+from hardware_handler import HardwareManager
+from webp_handler import process_all
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QFileDialog, QTextEdit, QVBoxLayout, QWidget, \
     QHBoxLayout, QLabel, QGridLayout, QTreeView, QMessageBox
@@ -55,56 +59,77 @@ class FileDialogExample(QMainWindow):
         self.button.clicked.connect(self.openFileDialog)
         button_layout.addWidget(self.button, 0, 1)
 
-        self.select_button = QPushButton("Setup 360 Rig", self)
-        # self.select_button.setEnabled(False)
-        self.select_button.setFixedSize(250, 50)
-        # keyboard.add_hotkey('ctrl+home', setup(selected=self.selected))
-        self.select_button.clicked.connect(self.setApp)
-        button_layout.addWidget(self.select_button, 0, 0)
+        self.capture_button = QPushButton("Capture Photos", self)
+        self.capture_button.setFixedSize(250, 50)
+        self.capture_button.clicked.connect(self.capture)
+        self.capture_button.setEnabled(False)
+        button_layout.addWidget(self.capture_button, 0, 0)
 
-        # self.copy_button = QPushButton("Select Directory")
-        # self.copy_button.setEnabled(False)  # Disabled by default
-        # self.copy_button.setFixedSize(250, 50)
-        # self.copy_button.clicked.connect(self.copy_selected_name)
-        # button_layout.addWidget(self.copy_button, 1, 0)
-
-        self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.clicked.connect(self.refresh_view)
-        self.refresh_button.setFixedSize(250, 50)
-        button_layout.addWidget(self.refresh_button, 1, 1)
-        #
-        self.first_click_button = QPushButton("Setup Camera", self)
-        self.first_click_button.setFixedSize(250, 50)
-        self.first_click_button.clicked.connect(self.setup_camera)
-        self.first_click_button.setEnabled(False)
-        button_layout.addWidget(self.first_click_button, 2, 0)
-
-        self.start_button = QPushButton("Start", self)
-        self.start_button.setEnabled(False)
-        self.start_button.setFixedSize(250, 50)
-        self.start_button.clicked.connect(self.start_machine)
-        button_layout.addWidget(self.start_button, 2, 1)
-        #
         layout.addLayout(button_layout)
         #
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
-    def start_machine(self):
-        click_second()
-        self.start_button.setEnabled(False)
 
-    def setup_camera(self):
-        click_first(path=os.path.join(self.target_folder, self.model.filePath(self.tree_view.selectedIndexes()[0])))
-        self.start_button.setEnabled(True)
-        self.first_click_button.setEnabled(False)
-    def setApp(self):
-        self.select_button.setEnabled(False)
-        setup()
+    def capture(self):
+        selected = self.tree_view.selectedIndexes()
+        # print(selected)
+        if not selected:
+            return
+
+        name = self.model.filePath(selected[0])
+        self.selected_path = os.path.join(self.target_folder, name)
+        self.capture_button.setEnabled(False)
+
+        hw = HardwareManager(save_folder=self.selected_path)
+        hw.capture_sequence(num_photos=20)
+        # hw.cleanup()
+        self.run_photoshop_automation()
+
+    def show_alert_with_buttons(
+            parent: QWidget,
+            title: str,
+            message: str,
+            buttons=QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            icon=QMessageBox.Icon.Question
+    ) -> QMessageBox.StandardButton:
+
+        msg_box = QMessageBox(parent)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(message)
+        msg_box.setStandardButtons(buttons)
+        msg_box.setIcon(icon)
+        result = msg_box.exec()
+        return result
+
+    def run_photoshop_automation(self):
+        win_path = os.path.abspath(self.selected_path).replace('/', '\\')
+
+        with open("C:/Users/Cinek/PycharmProjects/360-Operator/folder_path.txt", "w") as f:
+            f.write(win_path)
+
+        jsx_script = "C:/Users/Cinek/PycharmProjects/360-Operator/auto_process.jsx"
+        photoshop_exe = r"C:\Program Files\Adobe\Adobe Photoshop 2024\Photoshop.exe"  # Change path if needed
+        print("✅ Photoshop automation started.")
+        subprocess.run([
+            photoshop_exe,
+            jsx_script
+        ], check=True)
+        process_all(self.selected_path)
+        self.start_upload()
+
+    def start_upload(self):
+        result = self.show_alert_with_buttons(self, "Automatic Upload", "Upload")
+
+        if result == QMessageBox.StandardButton.Ok:
+            print("Użytkownik wybrał OK")
+        elif result == QMessageBox.StandardButton.Cancel:
+            print("Użytkownik anulował")
+
     def validate_selection(self):
         selected = self.tree_view.selectedIndexes()
         if not selected:
-            self.first_click_button.setEnabled(False)
+            self.capture_button.setEnabled(False)
             # self.select_button.setEnabled(False)
             return
         #
@@ -112,14 +137,14 @@ class FileDialogExample(QMainWindow):
         path = self.model.filePath(index)
 
         is_valid = False
-        if os.path.isdir(path) and not self.select_button.isEnabled():
+        if os.path.isdir(path) and not self.capture_button.isEnabled():
             has_subfolders = any(
                 os.path.isdir(os.path.join(path, item))
                 for item in os.listdir(path)
             )
             is_valid = not has_subfolders
 
-        self.first_click_button.setEnabled(is_valid)
+        self.capture_button.setEnabled(is_valid)
 
     def on_item_double_clicked(self, index):
         path = self.model.filePath(index)
@@ -129,28 +154,10 @@ class FileDialogExample(QMainWindow):
             except:
                 QMessageBox.information(self, "Info", f"Would open: {path}")
 
-    def copy_selected_name(self):
-        selected = self.tree_view.selectedIndexes()
-        # print(selected)
-        if not selected:
-            return
-
-        name = self.model.filePath(selected[0])
-        self.selected_path = os.path.join(self.target_folder, name)
-        print(self.selected_path)
-        # self.selected_path = self.selected_path.replace("C:/Users/Cinek/Desktop/Zdjecia360/", "")
-        # open_file(self.selected_path)
-        # QApplication.clipboard().setText(name)
-        # QMessageBox.information(self, "Copied", f"Copied: {name}")
-
     def refresh_view(self):
         self.model.setRootPath(self.target_folder)
         self.tree_view.setRootIndex(self.model.index(self.target_folder))
         self.current_dir_label.setText(f"Current Directory: {self.target_folder}")
-
-    def copy_to_clipboard(self):
-        clipboard = QApplication.clipboard()
-        clipboard.setText(self.text_edit.toPlainText())
 
     def clean_name(self, name, delete):
         name_upper = name.upper()
@@ -317,8 +324,8 @@ def main():
     app = QApplication(sys.argv)
     window = FileDialogExample()
     window.show()
-    keyboard.add_hotkey('f13', click_first)
-    keyboard.add_hotkey('f14', click_second)
+    # keyboard.add_hotkey('f13', click_first)
+    # keyboard.add_hotkey('f14', click_second)
 
 
     sys.exit(app.exec())
