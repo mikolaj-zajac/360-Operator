@@ -3,12 +3,14 @@ import subprocess
 import sys
 import os
 import csv
+import time
 from os import mkdir
 
 from pymsgbox import alert
 
 from hardware_handler import HardwareManager
 from webp_handler import process_all
+from uploader import upload_files
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QFileDialog, QTextEdit, QVBoxLayout, QWidget, \
     QHBoxLayout, QLabel, QGridLayout, QTreeView, QMessageBox
@@ -65,6 +67,16 @@ class FileDialogExample(QMainWindow):
         self.capture_button.setEnabled(False)
         button_layout.addWidget(self.capture_button, 0, 0)
 
+        self.temp = QPushButton("temp", self)
+        self.temp.setFixedSize(250, 50)
+        self.temp.clicked.connect(self.start_upload)
+        button_layout.addWidget(self.temp, 1, 0)
+
+        self.refresh_button = QPushButton("test", self)
+        self.refresh_button.setFixedSize(250, 50)
+        self.refresh_button.clicked.connect(self.test_camera)
+        button_layout.addWidget(self.refresh_button, 1, 1)
+
         layout.addLayout(button_layout)
         #
         container = QWidget()
@@ -86,6 +98,17 @@ class FileDialogExample(QMainWindow):
         # hw.cleanup()
         self.run_photoshop_automation()
 
+    def test_camera(self):
+        hw = HardwareManager(save_folder=self.selected_path)
+        if hw.capture_dslr_photo(filename="test.jpg"):
+            # messagebox.showinfo("Success", "Test photo captured successfully")
+            cmd = "usbipd detach --busid=3-1;"
+            subprocess.run(["powershell", "-Command", cmd])
+            time.sleep(1)
+            cmd = "usbipd attach --wsl --busid=3-1"
+            subprocess.run(["powershell", "-Command", cmd])
+
+
     def show_alert_with_buttons(
             parent: QWidget,
             title: str,
@@ -105,10 +128,10 @@ class FileDialogExample(QMainWindow):
     def run_photoshop_automation(self):
         win_path = os.path.abspath(self.selected_path).replace('/', '\\')
 
-        with open("C:/Users/Cinek/PycharmProjects/360-Operator/folder_path.txt", "w") as f:
+        with open("folder_path.txt", "w") as f:
             f.write(win_path)
 
-        jsx_script = "C:/Users/Cinek/PycharmProjects/360-Operator/auto_process.jsx"
+        jsx_script = "auto_process.jsx"
         photoshop_exe = r"C:\Program Files\Adobe\Adobe Photoshop 2024\Photoshop.exe"  # Change path if needed
         print("✅ Photoshop automation started.")
         subprocess.run([
@@ -119,10 +142,15 @@ class FileDialogExample(QMainWindow):
         self.start_upload()
 
     def start_upload(self):
-        result = self.show_alert_with_buttons(self, "Automatic Upload", "Upload")
+        result = self.show_alert_with_buttons("updt", "Automatic Upload")
 
         if result == QMessageBox.StandardButton.Ok:
             print("Użytkownik wybrał OK")
+            with open("folder_path.txt", "r") as f:
+                print(f.read())
+
+                upload_files(f.read())
+
         elif result == QMessageBox.StandardButton.Cancel:
             print("Użytkownik anulował")
 
@@ -198,6 +226,8 @@ class FileDialogExample(QMainWindow):
                                     name = name.replace("Ć³", "ó")
                                 if "Ä" in name:
                                     name = name.replace("Ä", "ą")
+                                if "ozonowanie" in name.lower():
+                                    continue
                                 if "butów" in name.lower():
                                     continue
                                 if "nakładk" in name.lower():
@@ -329,7 +359,6 @@ def main():
 
 
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()

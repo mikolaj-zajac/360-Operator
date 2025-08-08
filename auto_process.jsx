@@ -1,6 +1,6 @@
 // ===== KONFIGURACJA ===== //
-var ACTION_NAME = "Wycięcie Buty";
-var ACTION_SET = "Buty.atn";
+var ACTION_NAME = "Otwarty";
+var ACTION_SET = "Zestaw 1.atn";
 var OUTPUT_FORMAT = "PNG"; // Zapisz jako PNG
 var mainFolder = null; // Declare globally
 

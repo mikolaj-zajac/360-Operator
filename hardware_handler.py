@@ -162,7 +162,7 @@ class HardwareManager:
             def target():
                 try:
                     result = subprocess.run(
-                        cmd, capture_output=True, text=True, check=True, timeout=timeout
+                        cmd, capture_output=True, text=True, check=True
                     )
                     result_queue.put(('success', result))
                 except Exception as e:
@@ -185,6 +185,7 @@ class HardwareManager:
             success, result = run_subprocess(
                 ['wsl', 'gphoto2', '--capture-image-and-download', f'--filename={wsl_dest_path}'], timeout=30
             )
+
             if not success:
                 logger.error("❌ gPhoto2 capture failed")
                 return False
@@ -201,19 +202,27 @@ class HardwareManager:
 
     def capture_sequence(self, num_photos=20, move_time=19):
         """Capture a sequence of photos with machine movement"""
+        self.send_command(self.COMMANDS["laser off"], "laser off")
 
         for i in range(1, num_photos + 1):
             logger.info(f"▶ Obrót {i}/{num_photos}")
             # Send move command
             self.send_command(self.COMMANDS["Lewo trzymanie"], "Lewo trzymanie")
 
-            time.sleep(move_time/num_photos)
+            time.sleep(move_time / num_photos)
+
             self.send_command(self.COMMANDS["Stop"], "Stop")
             # Capture photo
             filename = f"zdjecie_{i:02d}.jpg"
             self.capture_dslr_photo(filename=filename)
 
         logger.info(f"✅ Completed capturing {num_photos} photos")
+        self.send_command(self.COMMANDS["laser on"], "laser on")
+        cmd = "usbipd detach --busid=2-1;"
+        subprocess.run(["powershell", "-Command", cmd])
+        time.sleep(1)
+        cmd = "usbipd attach --wsl --busid=2-1"
+        subprocess.run(["powershell", "-Command", cmd])
         return True
 
     def cleanup(self):
@@ -265,7 +274,12 @@ class App:
     def test_camera(self):
         """Test camera by capturing a single photo"""
         if self.hardware.capture_dslr_photo(filename="test.jpg"):
-            messagebox.showinfo("Success", "Test photo captured successfully")
+            # messagebox.showinfo("Success", "Test photo captured successfully")
+            cmd = "usbipd detach --busid=3-1;"
+            subprocess.run(["powershell", "-Command", cmd])
+            time.sleep(1)
+            cmd = "usbipd attach --wsl --busid=3-1"
+            subprocess.run(["powershell", "-Command", cmd])
         else:
             messagebox.showerror("Error", "Failed to capture test photo")
 
