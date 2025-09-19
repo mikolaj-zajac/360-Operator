@@ -17,6 +17,7 @@ CHROME_DRIVER_PATH = r""
 USERNAME = ""
 PASSWORD = ""
 
+
 def wait_for_upload_complete(driver, timeout=120):
     """Wait for all uploads to complete"""
     start_time = time.time()
@@ -28,9 +29,9 @@ def wait_for_upload_complete(driver, timeout=120):
     return False
 
 
-def process_product(driver, id, filename):
+def process_product(driver, product_id, filename):
     # Go to product page
-    product_url = f"https://defender.iai-shop.com/panel/product.php?idt={id}#descriptions"
+    product_url = f"https://defender.iai-shop.com/panel/product.php?idt={product_id}#descriptions"
     driver.get(product_url)
     time.sleep(2)
 
@@ -69,7 +70,6 @@ def process_product(driver, id, filename):
         radio2 = driver.find_element(By.ID, "jsfg_projector_hide_1")
         driver.execute_script("arguments[0].click();", radio2)
 
-
         # Save changes
         driver.find_element(By.CSS_SELECTOR, "input[value='Zapisz']").click()
         time.sleep(1)
@@ -77,26 +77,19 @@ def process_product(driver, id, filename):
         time.sleep(2)
 
         # Go to visibility page
-
-        check_url = f"https://moto-tour.com.pl/projector.php?product={id}"
+        check_url = f"https://moto-tour.com.pl/projector.php?product={product_id}"
         driver.get(check_url)
         time.sleep(10)
 
-
     except Exception as e:
-        print(f"Error processing product {id}: {str(e)}")
-        driver.save_screenshot(f"error_{id}.png")
+        print(f"Error processing product {product_id}: {str(e)}")
+        driver.save_screenshot(f"error_{product_id}.png")
         return None
 
-def upload_files(folder_path):
 
-    json_path = os.path.join(folder_path, 'data.json')
-    with open(json_path, 'r') as file:
-        data = json.load(file)
-
-    productId = data["id"]
-
-    print(f"\nProcessing folder: {folder_path.split('/')[-1]}")
+def upload_files(folder_path, product_id):
+    print(f"\nProcessing folder: {folder_path}")
+    print(f"Using product ID: {product_id}")
 
     try:
         chrome_options = Options()
@@ -150,7 +143,7 @@ def upload_files(folder_path):
             ).click()
             time.sleep(1)
 
-            driver.find_element(By.ID, "fg_dir_name").send_keys(productId)
+            driver.find_element(By.ID, "fg_dir_name").send_keys(product_id)
             time.sleep(0.5)
 
             driver.find_element(By.CSS_SELECTOR, "img[onclick*='addDir']").click()
@@ -159,7 +152,7 @@ def upload_files(folder_path):
             print("Opening folder...")
             # Wait for the folder element to be present
             folder_element = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.XPATH, f"//span[text()='{productId}']"))
+                EC.presence_of_element_located((By.XPATH, f"//span[text()='{product_id}']"))
             )
 
             # Scroll the element into view with JavaScript
@@ -174,9 +167,16 @@ def upload_files(folder_path):
 
             # Wait for any resulting page changes
             time.sleep(2)
-            files_path = os.path.join(folder_path, 'WEBP Files')
-            files = [os.path.join(files_path, f) for f in os.listdir(files_path)
-                     if os.path.isfile(os.path.join(files_path, f))]
+
+            # Look for WEBP files in the folder
+            webp_files_path = os.path.join(folder_path, 'WEBP Files')
+            if not os.path.exists(webp_files_path):
+                print(f"WEBP Files directory not found at: {webp_files_path}")
+                # Try to find WEBP files directly in the folder
+                webp_files_path = folder_path
+
+            files = [os.path.join(webp_files_path, f) for f in os.listdir(webp_files_path)
+                     if os.path.isfile(os.path.join(webp_files_path, f)) and f.lower().endswith('.webp')]
 
             if files:
                 print(f"Uploading {len(files)} files...")
@@ -203,27 +203,29 @@ def upload_files(folder_path):
                     time.sleep(1)
                 except Exception as e:
                     print(f"Could not find Close button: {str(e)}")
-                    driver.save_screenshot(f"close_error_{productId}.png")
+                    driver.save_screenshot(f"close_error_{product_id}.png")
 
+            # Process the product
             if files:
                 filename = os.path.splitext(files[0])[0]  # Get filename without extension
-                print(f"\nProcessing product: {productId} (File: {filename})")
-                # json_path = os.path.join(folder_path, 'data.json')
-                # with open(folder_path+"/data.json", 'r') as file:
-                #     data = json.load(file)
+                print(f"\nProcessing product: {product_id} (File: {filename})")
 
-                product_link = process_product(driver, data["id"], filename)
+                product_link = process_product(driver, product_id, filename)
 
                 if product_link:
                     print(f"Successfully processed: {product_link}")
                 else:
-                    print(f"Failed to process product {productId}")
+                    print(f"Failed to process product {product_id}")
 
             driver.quit()
+            return True
+
         except Exception as e:
-            print(f"Error processing {productId}: {str(e)}")
-            driver.save_screenshot(f"error_{productId}.png")
+            print(f"Error processing {product_id}: {str(e)}")
+            driver.save_screenshot(f"error_{product_id}.png")
+            driver.quit()
+            return False
+
     except Exception as e:
-        print(f"Error processing {productId}: {str(e)}")
-if __name__ == "__main__":
-    upload_files(r"C:\Users\Cinek\Desktop\Zdjecia360\kask\Scorpion\exo-r1 evo carbon air cynergy czarno-żółty")
+        print(f"Error processing {product_id}: {str(e)}")
+        return False

@@ -31,67 +31,163 @@ class HardwareManager:
             "cos3": bytes.fromhex("020400000005319eda"),
             "cos4": bytes.fromhex("020601000000000009"),
         }
-        self.initialize_hardware()
+        # self.initialize_hardware()
+
+    def pre_focus_camera(self):
+        """Pre-focus camera to reduce capture time"""
+        try:
+            # Half-press shutter to focus (simulate with gphoto2)
+            result = subprocess.run(
+                ['wsl', 'gphoto2', '--trigger-capture'],
+                capture_output=True, text=True, timeout=10
+            )
+            time.sleep(0.5)  # Short delay for focus
+            return True
+        except:
+            return False  # Not critical if this fails
 
     def initialize_hardware(self):
-        self.initialize_serial()
-        self.initialize_camera()
+        """Initialize hardware with UI feedback"""
+        success = self.initialize_serial()
+        if success:
+            success = self.initialize_camera()
+        return success
 
-    def initialize_serial(self):
-        """Initialize serial connection on COM3"""
+    def initialize_serial(self, preferred_port='COM3'):
+        """Initialize serial connection, trying multiple COM ports if needed"""
+        # List of COM ports to try, starting with the preferred one
+        ports_to_try = [preferred_port] + [f'COM{i}' for i in range(1, 11) if f'COM{i}' != preferred_port]
+
+        for port in ports_to_try:
+            try:
+                logger.info(f"Attempting to connect to {port}...")
+                self.serial_conn = serial.Serial(
+                    port=port,
+                    baudrate=19200,
+                    timeout=1,
+                    write_timeout=1
+                )
+                # Test the connection by sending a stop command
+                self.serial_conn.write(self.COMMANDS["Stop"])
+                logger.info(f"✅ Serial connection established on {port}")
+                return True
+            except Exception as e:
+                logger.error(f"❌ Serial connection failed on {port}: {str(e)}")
+                if self.serial_conn:
+                    self.serial_conn.close()
+                    self.serial_conn = None
+
+        logger.error("❌ Could not establish serial connection on any port")
+        error_msg = (
+            "Serial connection failed on all tried ports!\n\n"
+            "Possible solutions:\n"
+            "1. Check if the device is connected and powered on\n"
+            "2. Check Device Manager for the correct COM port\n"
+            "3. Try reconnecting the USB cable\n"
+            "4. Restart the application after ensuring the device is connected"
+        )
+        messagebox.showerror("Serial Connection Error", error_msg)
+        self.serial_conn = None
+        return False
+
+    def prepare_canon_camera(self):
+        """Prepare Canon camera for automated capture - simplified version"""
         try:
-            logger.info("Attempting to connect to COM3...")
-            self.serial_conn = serial.Serial(
-                port='COM3',
-                baudrate=19200,
-                timeout=1,
-                write_timeout=1
-            )
-            self.serial_conn.write(self.COMMANDS["Stop"])
-            logger.info("✅ Serial connection established on COM3")
+            logger.info("Preparing Canon camera for capture...")
+
+            # Try to set basic configurations that work for most Canon cameras
+            config_commands = [
+                # Try common config names for image quality
+                ['--set-config', 'imagequality=0'],
+                ['--set-config', '/main/imgsettings/quality=0'],
+                ['--set-config', 'capturetarget=0'],  # Internal memory
+                ['--set-config', '/main/capturesettings/capturetarget=0'],
+            ]
+
+            for cmd in config_commands:
+                try:
+                    subprocess.run(['wsl', 'gphoto2'] + cmd, timeout=5, capture_output=True)
+                except:
+                    pass  # Ignore errors for configs that don't exist
+
+            # Try to disable auto power off with different config names
+            power_commands = [
+                ['--set-config', 'autopoweroff=0'],
+                ['--set-config', '/main/settings/autopoweroff=0'],
+                ['--set-config', 'output=0']  # Some Canons use this
+            ]
+
+            for cmd in power_commands:
+                try:
+                    subprocess.run(['wsl', 'gphoto2'] + cmd, timeout=5, capture_output=True)
+                except:
+                    pass
+
+            logger.info("Canon camera preparation completed")
+            return True
+
         except Exception as e:
-            logger.error(f"❌ Serial connection failed: {str(e)}")
-            error_msg = (
-                "Serial connection failed on COM3!\n\n"
-                "Possible solutions:\n"
-                "1. Close all programs using COM3 (e.g., PuTTY, Arduino IDE)\n"
-                "2. Check device connection and try a different USB port\n"
-                "3. Run PyCharm as Administrator\n"
-                "4. Verify the device driver in Device Manager\n"
-                f"Error details: {str(e)}"
-            )
-            messagebox.showerror("Serial Connection Error", error_msg)
-            self.serial_conn = None
+            logger.error(f"Camera preparation failed: {e}")
+            return False  # Don't fail completely if preparation fails
 
     def initialize_camera(self):
         """Initialize DSLR camera using gPhoto2 in WSL"""
-        if self.check_dslr_connection():
-            logger.info("✅ DSLR camera initialized")
-            return True
-        logger.error("❌ DSLR camera not detected. Please ensure:")
-        logger.error("1. Camera is connected via USB and in PTP mode")
-        logger.error("2. USB is attached to WSL: usbipd attach --wsl --busid=<BUSID>")
-        logger.error("3. gPhoto2 is installed in WSL")
-        return False
+        # This will be handled by the main application's WSL setup
+        return self.check_dslr_connection()
 
     def check_dslr_connection(self):
         """Check DSLR connection using gPhoto2 in WSL"""
         try:
             result = subprocess.run(
                 ['wsl', 'gphoto2', '--auto-detect'],
-                capture_output=True, text=True, check=True, timeout=10
+                capture_output=True, text=True, timeout=10
             )
-            logger.debug(f"gPhoto2 auto-detect output: {result.stdout}")
+            print(f"gPhoto2 auto-detect output: {result.stdout}")
             return 'usb' in result.stdout.lower()
-        except subprocess.TimeoutExpired:
-            logger.error("❌ gPhoto2 auto-detect timed out")
-            return False
-        except subprocess.CalledProcessError as e:
-            logger.error(f"❌ gPhoto2 error: {e.stderr}")
-            return False
         except Exception as e:
-            logger.error(f"❌ DSLR detection failed: {str(e)}")
+            print(f"❌ DSLR detection failed: {str(e)}")
             return False
+
+    def capture_sequence(self, num_photos=20, move_time=19):
+        """Capture a sequence of photos with machine movement and progress updates"""
+        self.pre_focus_camera()
+        if not self.serial_conn:
+            print("❌ Serial connection not established")
+            return False
+
+        self.send_command(self.COMMANDS["laser off"], "laser off")
+
+        for i in range(1, num_photos + 1):
+            print(f"▶ Obrót {i}/{num_photos}")
+
+            # Send progress update if callback provided
+            if self.progress_callback:
+                self.progress_callback(i, num_photos, "capturing")
+
+            # Send move command
+            self.send_command(self.COMMANDS["Lewo trzymanie"], "Lewo trzymanie")
+            time.sleep(move_time / num_photos)
+            self.send_command(self.COMMANDS["Stop"], "Stop")
+
+            # Capture photo
+            filename = f"zdjecie_{i:02d}.jpg"
+            success = self.capture_dslr_photo(filename=filename)
+            if not success:
+                print(f"❌ Failed to capture photo {i}")
+                return False
+
+        print(f"✅ Completed capturing {num_photos} photos")
+        self.send_command(self.COMMANDS["laser on"], "laser on")
+
+        # Reset USB connection
+        try:
+            subprocess.run(["powershell", "-Command", "usbipd detach --busid=2-1;"], timeout=5)
+            time.sleep(1)
+            subprocess.run(["powershell", "-Command", "usbipd attach --wsl --busid=2-1"], timeout=5)
+        except Exception as e:
+            print(f"USB reset failed: {e}")
+
+        return True
 
     def select_folder(self):
         """Open a folder selection dialog and set save_folder"""
@@ -139,11 +235,7 @@ class HardwareManager:
             return False
 
     def capture_dslr_photo(self, filename="photo.jpg"):
-        """Capture and save a DSLR photo to the selected folder using gPhoto2 in WSL"""
-        if not self.check_dslr_connection():
-            logger.error("❌ DSLR not available")
-            return False
-
+        """Capture and save a DSLR photo with proper gPhoto2 syntax"""
         # Ensure filename is unique
         base_filename = os.path.splitext(filename)[0]
         ext = os.path.splitext(filename)[1]
@@ -152,78 +244,109 @@ class HardwareManager:
         while os.path.exists(os.path.join(self.save_folder, unique_filename)):
             unique_filename = f"{base_filename}_{counter:03d}{ext}"
             counter += 1
+
         windows_path = os.path.join(self.save_folder, unique_filename)
         wsl_dest_path = self.to_wsl_path(windows_path)
 
-        def run_subprocess(cmd, timeout=10):
-            """Run subprocess with timeout and queue for non-blocking execution"""
-            result_queue = queue.Queue()
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"📸 Capture attempt {attempt + 1}/{max_retries} for {filename}")
 
-            def target():
-                try:
-                    result = subprocess.run(
-                        cmd, capture_output=True, text=True, check=True
-                    )
-                    result_queue.put(('success', result))
-                except Exception as e:
-                    result_queue.put(('error', e))
+                # Reset USB connection if this is a retry
+                if attempt > 0:
+                    self.reset_usb_connection()
+                    time.sleep(3)
 
-            thread = threading.Thread(target=target)
-            thread.start()
-            thread.join(timeout)
-            if thread.is_alive():
-                logger.error(f"Subprocess timed out: {cmd}")
-                return False, None
-            result_type, result = result_queue.get()
-            if result_type == 'error':
-                raise result
-            return True, result
+                # FIXED: Use proper gPhoto2 command syntax
+                # Method 1: Standard capture and download
+                result = subprocess.run(
+                    ['wsl', 'gphoto2', '--capture-image-and-download', f'--filename={wsl_dest_path}'],
+                    capture_output=True, text=True, timeout=25
+                )
 
+                if result.returncode == 0:
+                    logger.info(f"✅ Photo saved to {windows_path}")
+                    return True
+                else:
+                    logger.warning(f"Attempt {attempt + 1} failed: {result.stderr}")
+
+                    # Method 2: Alternative approach for Canon
+                    if "Device Busy" in result.stderr or "PTP" in result.stderr:
+                        logger.info("Trying alternative Canon capture method...")
+                        success = self.canon_alternative_capture(wsl_dest_path)
+                        if success:
+                            return True
+                        else:
+                            # Wait longer before retry for Canon
+                            time.sleep(4)
+
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Attempt {attempt + 1} timed out")
+                if attempt < max_retries - 1:
+                    time.sleep(3)
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1} error: {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(3)
+
+        logger.error(f"❌ All capture attempts failed for {filename}")
+        return False
+
+    def canon_alternative_capture(self, wsl_path):
+        """Alternative capture method specifically for Canon cameras"""
         try:
-            # Capture image directly into WSL-accessible Windows path
-            logger.debug(f"Capturing photo in WSL: {wsl_dest_path}")
-            success, result = run_subprocess(
-                ['wsl', 'gphoto2', '--capture-image-and-download', f'--filename={wsl_dest_path}'], timeout=30
+            # Method 1: Separate capture and download
+            result1 = subprocess.run(
+                ['wsl', 'gphoto2', '--capture-image'],
+                capture_output=True, text=True, timeout=15
             )
 
-            if not success:
-                logger.error("❌ gPhoto2 capture failed")
-                return False
-            logger.debug(f"gPhoto2 capture output: {result.stdout}")
+            if result1.returncode == 0:
+                time.sleep(2)  # Wait for camera to process
+                # Download the last image
+                result2 = subprocess.run(
+                    ['wsl', 'gphoto2', '--get-file=0', '--filename', wsl_path],
+                    capture_output=True, text=True, timeout=15
+                )
+                return result2.returncode == 0
 
-            logger.info(f"📸 DSLR photo saved to {windows_path}")
-            return True
-        except subprocess.CalledProcessError as e:
-            logger.error(f"❌ gPhoto2 error: stdout={e.stdout}, stderr={e.stderr}")
+            # Method 2: Use trigger capture for some Canon models
+            result3 = subprocess.run(
+                ['wsl', 'gphoto2', '--trigger-capture'],
+                capture_output=True, text=True, timeout=15
+            )
+
+            if result3.returncode == 0:
+                time.sleep(2)
+                result4 = subprocess.run(
+                    ['wsl', 'gphoto2', '--get-file=0', '--filename', wsl_path],
+                    capture_output=True, text=True, timeout=15
+                )
+                return result4.returncode == 0
+
             return False
+
         except Exception as e:
-            logger.error(f"❌ Capture error: {str(e)}")
+            logger.error(f"Canon alternative capture failed: {e}")
             return False
 
-    def capture_sequence(self, num_photos=20, move_time=19):
-        """Capture a sequence of photos with machine movement"""
-        self.send_command(self.COMMANDS["laser off"], "laser off")
+    def reset_usb_connection(self, busid="2-1"):
+        """Reset USB connection to clear device busy state"""
+        try:
+            # Detach from WSL
+            subprocess.run(["powershell", "-Command", f"usbipd detach --busid={busid}"],
+                           timeout=5, capture_output=True)
+            time.sleep(2)
 
-        for i in range(1, num_photos + 1):
-            logger.info(f"▶ Obrót {i}/{num_photos}")
-            # Send move command
-            self.send_command(self.COMMANDS["Lewo trzymanie"], "Lewo trzymanie")
-
-            time.sleep(move_time / num_photos)
-
-            self.send_command(self.COMMANDS["Stop"], "Stop")
-            # Capture photo
-            filename = f"zdjecie_{i:02d}.jpg"
-            self.capture_dslr_photo(filename=filename)
-
-        logger.info(f"✅ Completed capturing {num_photos} photos")
-        self.send_command(self.COMMANDS["laser on"], "laser on")
-        cmd = "usbipd detach --busid=2-1;"
-        subprocess.run(["powershell", "-Command", cmd])
-        time.sleep(1)
-        cmd = "usbipd attach --wsl --busid=2-1"
-        subprocess.run(["powershell", "-Command", cmd])
-        return True
+            # Reattach to WSL
+            subprocess.run(["powershell", "-Command", f"usbipd attach --wsl --busid={busid}"],
+                           timeout=10, capture_output=True)
+            time.sleep(3)  # Longer wait for Canon cameras to reinitialize
+            return True
+        except Exception as e:
+            logger.error(f"USB reset failed: {e}")
+            return False
 
     def cleanup(self):
         """Clean up resources"""

@@ -4,120 +4,716 @@ import sys
 import os
 import csv
 import time
+import threading
+import re
 from os import mkdir
 
 from pymsgbox import alert
 
-from hardware_handler import HardwareManager
+from hardware_handler import HardwareManager, logger
 from webp_handler import process_all
 from uploader import upload_files
 
-from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QFileDialog, QTextEdit, QVBoxLayout, QWidget, \
-    QHBoxLayout, QLabel, QGridLayout, QTreeView, QMessageBox
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QFileDialog, QTextEdit, QVBoxLayout, QWidget,
+                             QHBoxLayout, QLabel, QGridLayout, QTreeView, QMessageBox, QLineEdit, QSizePolicy, QFrame)
 from PyQt6.QtGui import QColor, QFileSystemModel
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 
 class FileDialogExample(QMainWindow):
     def __init__(self):
         super().__init__()
         self.selected_path = ""
+        self.capture_in_progress = False
+        self.camera_busid = None
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         self.target_folder = os.path.join(desktop, "Zdjecia360")
         # Create folder if it doesn't exist
         if not os.path.exists(self.target_folder):
             os.makedirs(self.target_folder)
 
+        # Initialize hardware manager
+        self.hardware_manager = None
+        self.capture_in_progress = False
+        self.camera_busid = None  # Store detected camera bus ID
+
+        self.last_errors = {'Table360': '', 'Camera': '', 'System': ''}
+
         self.initUI()
+        self.init_wsl_environment()
+
+    def show_error_message(self, device, message):
+        """Show error message in UI and log"""
+        print(f"❌ {device} Error: {message}")
+        self.last_errors[device] = message
+
+        # Update UI based on device type
+        if device == "Table360":
+            self.update_status_label(self.table_label, "Error")
+            self.device_states['Table360'] = 'Error'
+        elif device == "Camera":
+            self.update_status_label(self.camera_label, "Error")
+            self.device_states['Camera'] = 'Error'
+
+        # Show alert for critical errors
+        if "failed" in message.lower() or "error" in message.lower():
+            QMessageBox.critical(self, f"{device} Error", message)
+
+    def update_status_label(self, label: QLabel, state: str):
+        """Update status label with detailed error info if available"""
+        title = label.property('device_title') or label.text().split(':')[0]
+
+        if state == 'Error':
+            # Get the last error for this device
+            device_name = "Table360" if "Table360" in title else "Camera"
+            error_msg = self.last_errors.get(device_name, 'Unknown error')
+            label.setText(f"{title}: Error - {error_msg[:30]}...")
+            label.setStyleSheet('color: #c62828; font-weight: 700;')
+        else:
+            label.setText(f"{title}: {state}")
+            if state == 'Connected':
+                label.setStyleSheet('color: #2e7d32; font-weight: 700;')
+            else:
+                label.setStyleSheet('color: #606060; font-weight: 700;')
+
+    def init_wsl_environment(self):
+        """Initialize WSL environment in background thread"""
+
+        def setup_wsl():
+            try:
+                # Check if WSL is available
+                result = subprocess.run(['wsl', 'echo', 'WSL ready'],
+                                        capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    print("WSL is already running")
+                    return
+            except:
+                print("WSL not immediately available")
+
+            try:
+                # Start WSL
+                subprocess.Popen(['wsl'],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+                time.sleep(3)
+                print("WSL started")
+
+                # Check if gphoto2 is installed
+                install_check = subprocess.run(
+                    ['wsl', 'which', 'gphoto2'],
+                    capture_output=True, text=True, timeout=10
+                )
+
+                if install_check.returncode != 0:
+                    print("gPhoto2 not found in WSL, attempting to install...")
+                    subprocess.run(
+                        ['wsl', 'sudo', 'apt-get', 'update', '-y'],
+                        capture_output=True, timeout=120
+                    )
+                    subprocess.run(
+                        ['wsl', 'sudo', 'apt-get', 'install', '-y', 'gphoto2'],
+                        capture_output=True, timeout=180
+                    )
+                    print("gPhoto2 installation completed")
+
+            except Exception as e:
+                print(f"Failed to initialize WSL: {e}")
+
+        thread = threading.Thread(target=setup_wsl, daemon=True)
+        thread.start()
+
+    def detect_camera_busid(self):
+        """Detect the camera's USB bus ID using usbipd"""
+        try:
+            # List all USB devices
+            result = subprocess.run(
+                ["powershell", "-Command", "usbipd list"],
+                capture_output=True, text=True, timeout=10
+            )
+
+            if result.returncode != 0:
+                print("Failed to list USB devices")
+                return None
+
+            # Parse the output to find camera devices
+            lines = result.stdout.split('\n')
+            camera_busid = None
+
+            # Look for common camera vendors or PTP devices
+            camera_keywords = ['canon', 'nikon', 'sony', 'fuji', 'olympus', 'panasonic',
+                               'ptp', 'picture transfer', 'camera', 'dslr']
+
+            for line in lines:
+                if re.match(r'^\d+-\d+\s+', line):  # Line with bus ID
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        busid = parts[0]
+                        description = ' '.join(parts[2:]).lower()
+
+                        # Check if this looks like a camera
+                        if any(keyword in description for keyword in camera_keywords):
+                            print(f"Found potential camera: {description} at {busid}")
+                            camera_busid = busid
+                            break
+
+            return camera_busid
+
+        except Exception as e:
+            print(f"USB detection error: {e}")
+            return None
+
+    def attach_usb_to_wsl(self, busid=None):
+        """Attach USB device to WSL"""
+        if busid is None:
+            # Try to detect camera bus ID
+            busid = self.detect_camera_busid()
+            if busid is None:
+                print("Could not detect camera bus ID")
+                return False
+
+        try:
+            # Detach first if already attached
+            subprocess.run(
+                ["powershell", "-Command", f"usbipd detach --busid={busid}"],
+                capture_output=True, timeout=5
+            )
+            time.sleep(1)
+
+            # Attach to WSL
+            result = subprocess.run(
+                ["powershell", "-Command", f"usbipd attach --wsl --busid={busid}"],
+                capture_output=True, text=True, timeout=10
+            )
+
+            if result.returncode == 0:
+                print(f"USB device {busid} attached to WSL")
+                self.camera_busid = busid  # Store the successful bus ID
+                return True
+            else:
+                print(f"Failed to attach USB: {result.stderr}")
+                return False
+
+        except Exception as e:
+            print(f"USB attachment error: {e}")
+            return False
+
+    def check_camera_connection(self):
+        """Check if camera is connected via gPhoto2"""
+        try:
+            result = subprocess.run(
+                ['wsl', 'gphoto2', '--auto-detect'],
+                capture_output=True, text=True, timeout=15
+            )
+
+            if result.returncode == 0 and 'usb' in result.stdout.lower():
+                print("Camera detected via gPhoto2")
+                return True
+            else:
+                print("Camera not detected via gPhoto2")
+                print(f"gPhoto2 output: {result.stdout}")
+                if result.stderr:
+                    print(f"gPhoto2 error: {result.stderr}")
+                return False
+
+        except Exception as e:
+            print(f"Camera check failed: {e}")
+            return False
 
     def initUI(self):
-        self.setWindowTitle('360 Photos Explorer')
-        self.setGeometry(100, 100, 800, 600)
+        from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+                                     QPushButton, QLineEdit, QFrame, QProgressBar)
+        from PyQt6.QtCore import Qt, QTimer
+        from PyQt6.QtGui import QFont
 
-        # Central widget and layout
+        self.setWindowTitle("Pastel App")
+        self.resize(400, 300)
+
+        # Create central widget
         central_widget = QWidget()
-
         self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
 
-        # Label showing current directory
-        self.current_dir_label = QLabel(f"Current Directory: {self.target_folder}")
-        layout.addWidget(self.current_dir_label)
+        # --- Main layout ---
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(14, 14, 14, 14)
+        main_layout.setSpacing(12)
 
-        # Tree view for file system
-        self.tree_view = QTreeView()
-        self.model = QFileSystemModel()
-        self.model.setRootPath(self.target_folder)
-        self.tree_view.setModel(self.model)
-        self.tree_view.setRootIndex(self.model.index(self.target_folder))
-        self.tree_view.setSelectionMode(QTreeView.SelectionMode.SingleSelection)
-        self.tree_view.selectionModel().selectionChanged.connect(self.validate_selection)
-        self.tree_view.doubleClicked.connect(self.on_item_double_clicked)
-        layout.addWidget(self.tree_view)
+        # --- Name input + Start button (horizontal) ---
+        name_row = QHBoxLayout()
+        name_row.setSpacing(10)
 
-        button_layout = QGridLayout()
-        #
-        self.button = QPushButton("Select update file", self)
-        self.button.setFixedSize(250, 50)
-        self.button.clicked.connect(self.openFileDialog)
-        button_layout.addWidget(self.button, 0, 1)
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("Enter name...")
+        self.name_input.textChanged.connect(self.toggle_start_button)
+        self.name_input.setMinimumWidth(220)
+        self.name_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        self.capture_button = QPushButton("Capture Photos", self)
-        self.capture_button.setFixedSize(250, 50)
-        self.capture_button.clicked.connect(self.capture)
-        self.capture_button.setEnabled(False)
-        button_layout.addWidget(self.capture_button, 0, 0)
+        self.start_button = QPushButton("Start Capture")
+        self.start_button.setEnabled(False)
+        self.start_button.clicked.connect(self.start_capture_process)
+        # Make font bigger for start button
+        font = self.start_button.font()
+        font.setPointSize(font.pointSize() + 2)
+        font.setBold(True)
+        self.start_button.setFont(font)
 
-        self.temp = QPushButton("temp", self)
-        self.temp.setFixedSize(250, 50)
-        self.temp.clicked.connect(self.start_upload)
-        button_layout.addWidget(self.temp, 1, 0)
+        name_row.addWidget(self.name_input)
+        name_row.addWidget(self.start_button)
+        main_layout.addLayout(name_row)
 
-        self.refresh_button = QPushButton("test", self)
-        self.refresh_button.setFixedSize(250, 50)
-        self.refresh_button.clicked.connect(self.test_camera)
-        button_layout.addWidget(self.refresh_button, 1, 1)
+        # --- Helper to create framed connection rows ---
+        def make_connection_row(title: str):
+            frame = QFrame()
+            frame.setFrameShape(QFrame.Shape.StyledPanel)
+            frame_layout = QHBoxLayout()
+            frame_layout.setContentsMargins(10, 8, 10, 8)
+            frame_layout.setSpacing(8)
+            frame.setLayout(frame_layout)
 
-        layout.addLayout(button_layout)
-        #
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
+            label = QLabel(f"{title}: Not connected")
+            label.setProperty('device_title', title)
+            label.setMinimumWidth(220)
+            label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-    def capture(self):
-        selected = self.tree_view.selectedIndexes()
-        # print(selected)
-        if not selected:
+            btn = QPushButton("Connect")
+            btn.setProperty('device', title)
+
+            frame_layout.addWidget(label)
+            frame_layout.addStretch()
+            frame_layout.addWidget(btn)
+
+            return frame, label, btn
+
+        # create rows
+        table_frame, self.table_label, self.table_button = make_connection_row("Table360")
+        camera_frame, self.camera_label, self.camera_button = make_connection_row("Camera")
+
+        main_layout.addWidget(table_frame)
+        main_layout.addWidget(camera_frame)
+        main_layout.addStretch()
+
+        # Progress bar section
+        progress_layout = QVBoxLayout()
+        progress_layout.setSpacing(8)
+
+        # Progress bar label
+        self.progress_label = QLabel("Ready")
+        self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        progress_layout.addWidget(self.progress_label)
+
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        progress_layout.addWidget(self.progress_bar)
+
+        # Add progress section to main layout
+        main_layout.addLayout(progress_layout)
+
+        # track states for demo/testing
+        self.device_states = {'Table360': 'Not connected', 'Camera': 'Not connected'}
+
+        # Track progress state
+        self.current_stage = "ready"
+
+        # connect signals
+        self.table_button.clicked.connect(lambda: self.cycle_connect('Table360'))
+        self.camera_button.clicked.connect(lambda: self.cycle_connect('Camera'))
+
+        # --- Pastel stylesheet with enhanced button styles ---
+        self.setStyleSheet("""
+        QWidget { 
+            background-color: #f6f8fb; 
+            font-family: Arial, Helvetica, sans-serif; 
+            font-size: 13px; 
+            color: #333; 
+        }
+        QFrame { 
+            background-color: #ffffff; 
+            border-radius: 10px; 
+            border: 1px solid rgba(163,201,199,0.12); 
+        }
+        QLineEdit { 
+            border: 2px solid #e6eef0; 
+            border-radius: 8px; 
+            padding: 7px; 
+            background-color: #ffffff; 
+            height: 32px;
+        }
+        QPushButton { 
+            background-color: #a3c9c7; 
+            border: none; 
+            border-radius: 8px; 
+            padding: 6px 12px; 
+            color: #ffffff; 
+            font-weight: 600;
+            min-width: 80px;
+            height: 32px;
+        }
+        QPushButton:disabled { 
+            background-color: #e6e6e6; 
+            color: #9a9a9a; 
+        }
+        QPushButton:hover:enabled { 
+            background-color: #8fb8b6; 
+        }
+        QPushButton#start_button { 
+            background-color: #ff9f43; 
+            font-size: 14px;
+            font-weight: bold;
+        }
+        QPushButton#start_button:hover:enabled { 
+            background-color: #ed8624; 
+        }
+        QLabel { 
+            padding: 2px; 
+        }
+        QProgressBar {
+            border: 2px solid #e6eef0;
+            border-radius: 5px;
+            text-align: center;
+            height: 20px;
+        }
+        QProgressBar::chunk {
+            background-color: #a3c9c7;
+            border-radius: 3px;
+        }
+        """)
+
+        # Apply special style to start button
+        self.start_button.setObjectName("start_button")
+
+    def toggle_start_button(self):
+        text = self.name_input.text().strip()
+        # Only enable if name is entered and both devices are connected
+        devices_connected = (self.device_states.get('Table360') == 'Connected' and
+                             self.device_states.get('Camera') == 'Connected')
+        self.start_button.setEnabled(bool(text) and devices_connected and not self.capture_in_progress)
+
+    def cycle_connect(self, device: str):
+        if device == 'Table360':
+            if self.device_states[device] == 'Not connected':
+                # Initialize hardware manager if not already done
+                if self.hardware_manager is None:
+                    self.hardware_manager = HardwareManager()
+
+                # Try to connect to serial
+                connected = self.hardware_manager.initialize_serial()
+                new_state = 'Connected' if connected else 'Error'
+                self.device_states[device] = new_state
+                self.update_status_label(self.table_label, new_state)
+            else:
+                # Disconnect
+                if self.hardware_manager and self.hardware_manager.serial_conn:
+                    self.hardware_manager.serial_conn.close()
+                    self.hardware_manager.serial_conn = None
+                self.device_states[device] = 'Not connected'
+                self.update_status_label(self.table_label, 'Not connected')
+
+        # In your cycle_connect method for Camera:
+        elif device == 'Camera':
+            if self.device_states[device] == 'Not connected':
+                # Try to attach USB and check camera
+                attached = self.attach_usb_to_wsl()
+                if attached:
+                    # Give it more time to initialize for Canon
+                    time.sleep(4)
+                    connected = self.check_camera_connection()
+                    if connected:
+                        # Try to prepare camera, but don't fail if it doesn't work
+                        preparation_success = self.hardware_manager.prepare_canon_camera()
+                        if preparation_success:
+                            new_state = 'Connected'
+                        else:
+                            new_state = 'Connected'  # Still connected even if preparation failed
+                            print("Camera connected but some settings couldn't be configured")
+                    else:
+                        new_state = 'Error'
+                    self.device_states[device] = new_state
+                    self.update_status_label(self.camera_label, new_state)
+                else:
+                    new_state = 'Error'
+                    self.device_states[device] = new_state
+                    self.update_status_label(self.camera_label, new_state)
+            else:
+                if self.camera_busid:
+                    try:
+                        subprocess.run(["powershell", "-Command", f"usbipd detach --busid={self.camera_busid}"],
+                                       timeout=5)
+                    except:
+                        pass
+                self.device_states[device] = 'Not connected'
+                self.update_status_label(self.camera_label, 'Not connected')
+                self.camera_busid = None
+
+        # Update start button state
+        self.toggle_start_button()
+
+    def update_status_label(self, label: QLabel, state: str):
+        title = label.property('device_title') or label.text().split(':')[0]
+        label.setText(f"{title}: {state}")
+        if state == 'Connected':
+            label.setStyleSheet('color: #2e7d32; font-weight: 700;')
+        elif state == 'Error':
+            label.setStyleSheet('color: #c62828; font-weight: 700;')
+        else:
+            label.setStyleSheet('color: #606060; font-weight: 700;')
+
+    def start_capture_process(self):
+        """Start the photo capture and processing workflow"""
+        folder_name = self.name_input.text().strip()
+        if not folder_name:
             return
 
-        name = self.model.filePath(selected[0])
-        self.selected_path = os.path.join(self.target_folder, name)
-        self.capture_button.setEnabled(False)
+        # Clear previous errors
+        self.last_errors = {'Table360': '', 'Camera': '', 'System': ''}
 
-        hw = HardwareManager(save_folder=self.selected_path)
-        hw.capture_sequence(num_photos=20)
-        # hw.cleanup()
-        self.run_photoshop_automation()
+        # Create the directory path
+        self.selected_path = os.path.join(self.target_folder, folder_name)
+        os.makedirs(self.selected_path, exist_ok=True)
 
-    def test_camera(self):
-        hw = HardwareManager(save_folder=self.selected_path)
-        if hw.capture_dslr_photo(filename="test.jpg"):
-            # messagebox.showinfo("Success", "Test photo captured successfully")
-            cmd = "usbipd detach --busid=3-1;"
-            subprocess.run(["powershell", "-Command", cmd])
-            time.sleep(1)
-            cmd = "usbipd attach --wsl --busid=3-1"
-            subprocess.run(["powershell", "-Command", cmd])
+        # Reset progress
+        self.current_stage = "capturing"
+        self.update_progress(0, "Taking photos 0/20")
 
+        # Disable start button during capture
+        self.capture_in_progress = True
+        self.toggle_start_button()
 
-    def show_alert_with_buttons(
-            parent: QWidget,
-            title: str,
-            message: str,
-            buttons=QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            icon=QMessageBox.Icon.Question
-    ) -> QMessageBox.StandardButton:
+        # Start the capture process in a separate thread
+        self.capture_thread = self.CaptureThread(
+            self.selected_path,
+            self.hardware_manager,
+            self.update_progress_callback,
+            self.camera_busid
+        )
+        self.capture_thread.finished.connect(self.on_capture_finished)
+        self.capture_thread.error_occurred.connect(self.show_error_message)  # Connect error signal
+        self.capture_thread.start()
 
-        msg_box = QMessageBox(parent)
+    def update_progress_callback(self, current, total, stage):
+        """Update progress from capture thread"""
+        progress_percent = int((current / total) * 100)
+        self.update_progress(progress_percent, f"{stage.capitalize()} {current}/{total}")
+
+    def on_capture_finished(self, success):
+        """Handle completion of capture thread"""
+        self.capture_in_progress = False
+        self.toggle_start_button()
+
+        if success:
+            self.process_photos()
+        else:
+            self.update_progress(0, "Capture failed")
+
+    # Thread class for capturing photos
+    # Thread class for capturing photos
+    # Thread class for capturing photos
+    class CaptureThread(QThread):
+        finished = pyqtSignal(bool)
+        error_occurred = pyqtSignal(str, str)
+
+        def __init__(self, save_path, hardware_manager, progress_callback, camera_busid):
+            super().__init__()
+            self.save_path = save_path
+            self.hardware_manager = hardware_manager
+            self.progress_callback = progress_callback
+            self.camera_busid = camera_busid
+            self.hardware_manager.save_folder = save_path
+
+        def run(self):
+            try:
+                # Turn off laser
+                if not self.hardware_manager.send_command(self.hardware_manager.COMMANDS["laser off"], "laser off"):
+                    self.error_occurred.emit("Table360", "Failed to turn off laser")
+                    self.finished.emit(False)
+                    return
+
+                num_photos = 20
+
+                # Reset camera connection before starting sequence
+                self.hardware_manager.reset_usb_connection(self.camera_busid)
+                time.sleep(3)
+
+                for i in range(1, num_photos + 1):
+                    logger.info(f"▶ Obrót {i}/{num_photos}")
+
+                    # Report progress
+                    self.progress_callback(i, num_photos, "capturing")
+
+                    # Start movement
+                    movement_success = self.hardware_manager.send_command(
+                        self.hardware_manager.COMMANDS["Lewo trzymanie"],
+                        "Lewo trzymanie"
+                    )
+
+                    if not movement_success:
+                        self.error_occurred.emit("Table360", "Movement command failed")
+                        self.finished.emit(False)
+                        return
+
+                    # Wait for movement to complete
+                    time.sleep(0.8)  # Reduced movement time
+
+                    # Stop movement
+                    if not self.hardware_manager.send_command(self.hardware_manager.COMMANDS["Stop"], "Stop"):
+                        self.error_occurred.emit("Table360", "Stop command failed")
+                        self.finished.emit(False)
+                        return
+
+                    # Short delay before capture
+                    time.sleep(0.2)
+
+                    # Capture photo
+                    filename = f"zdjecie_{i:02d}.jpg"
+                    success = self.hardware_manager.capture_dslr_photo(filename=filename)
+
+                    if not success:
+                        # Reset USB and try one more time
+                        self.hardware_manager.reset_usb_connection(self.camera_busid)
+                        time.sleep(3)
+                        success = self.hardware_manager.capture_dslr_photo(filename=filename)
+
+                        if not success:
+                            self.error_occurred.emit("Camera", f"Failed to capture photo {i} after reset")
+                            self.finished.emit(False)
+                            return
+
+                logger.info(f"✅ Completed capturing {num_photos} photos")
+
+                # Turn laser back on
+                self.hardware_manager.send_command(self.hardware_manager.COMMANDS["laser on"], "laser on")
+
+                self.finished.emit(True)
+
+            except Exception as e:
+                logger.error(f"Capture error: {e}")
+                self.error_occurred.emit("System", f"Unexpected error: {str(e)}")
+                self.finished.emit(False)
+
+    def process_photos(self):
+        """Process the captured photos"""
+        self.current_stage = "processing"
+        self.update_progress(0, "Processing photos...")
+
+        # Start processing in a separate thread
+        self.process_thread = self.ProcessThread(self.selected_path, self.update_progress)
+        self.process_thread.finished.connect(self.on_processing_finished)
+        self.process_thread.start()
+
+    def on_processing_finished(self, success):
+        """Handle completion of processing"""
+        if success:
+            self.upload_photos()
+        else:
+            self.update_progress(0, "Processing failed")
+
+    # Thread class for processing photos
+    class ProcessThread(QThread):
+        finished = pyqtSignal(bool)
+
+        def __init__(self, folder_path, progress_callback):
+            super().__init__()
+            self.folder_path = folder_path
+            self.progress_callback = progress_callback
+
+        def run(self):
+            try:
+                # Update progress
+                self.progress_callback(50, "Running Photoshop automation...")
+
+                # Run Photoshop automation
+                win_path = os.path.abspath(self.folder_path).replace('/', '\\')
+                with open("folder_path.txt", "w") as f:
+                    f.write(win_path)
+
+                jsx_script = "auto_process.jsx"
+                photoshop_exe = r"C:\Program Files\Adobe\Adobe Photoshop 2024\Photoshop.exe"
+
+                subprocess.run([photoshop_exe, jsx_script], check=True, timeout=300)
+
+                # Update progress
+                self.progress_callback(75, "Converting to WebP...")
+
+                # Process to WebP
+                process_all(self.folder_path)
+
+                self.progress_callback(100, "Processing complete!")
+                self.finished.emit(True)
+            except Exception as e:
+                logger.error(f"Processing error: {e}")
+                self.finished.emit(False)
+
+    def upload_photos(self):
+        """Upload the processed photos"""
+        self.current_stage = "uploading"
+        self.update_progress(0, "Uploading photos...")
+
+        # Get the product ID from the text input
+        product_id = self.name_input.text().strip()
+
+        # Start upload in a separate thread
+        self.upload_thread = self.UploadThread(self.selected_path, product_id, self.update_progress)
+        self.upload_thread.finished.connect(self.on_upload_finished)
+        self.upload_thread.start()
+
+    def on_upload_finished(self, success):
+        """Handle completion of upload"""
+        if success:
+            self.update_progress(100, "Upload complete!")
+            # Show success message
+            QMessageBox.information(self, "Success", "Upload completed successfully!")
+        else:
+            self.update_progress(0, "Upload failed!")
+            # Show error message
+            QMessageBox.critical(self, "Error", "Upload failed. Please check the logs for details.")
+
+        # Re-enable start button
+        self.start_button.setEnabled(True)
+    # Thread class for uploading photos
+    class UploadThread(QThread):
+        finished = pyqtSignal(bool)
+
+        def __init__(self, folder_path, product_id, progress_callback):
+            super().__init__()
+            self.folder_path = folder_path
+            self.product_id = product_id
+            self.progress_callback = progress_callback
+
+        def run(self):
+            try:
+                # Update progress
+                self.progress_callback(10, "Starting upload...")
+
+                # Import and call the uploader
+                from uploader import upload_files
+                success = upload_files(self.folder_path, self.product_id)
+
+                if success:
+                    self.progress_callback(100, "Upload complete!")
+                    self.finished.emit(True)
+                else:
+                    self.progress_callback(0, "Upload failed!")
+                    self.finished.emit(False)
+
+            except Exception as e:
+                logger.error(f"Upload error: {e}")
+                self.progress_callback(0, f"Upload error: {e}")
+                self.finished.emit(False)
+
+    def update_progress(self, value, text):
+        """Update progress bar and label"""
+        self.progress_bar.setValue(value)
+        self.progress_label.setText(text)
+
+    def show_alert_with_buttons(self, title, message, buttons=None, icon=None):
+        """Show message box with buttons"""
+        if buttons is None:
+            buttons = QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        if icon is None:
+            icon = QMessageBox.Icon.Question
+
+        msg_box = QMessageBox(self)
         msg_box.setWindowTitle(title)
         msg_box.setText(message)
         msg_box.setStandardButtons(buttons)
@@ -125,240 +721,13 @@ class FileDialogExample(QMainWindow):
         result = msg_box.exec()
         return result
 
-    def run_photoshop_automation(self):
-        win_path = os.path.abspath(self.selected_path).replace('/', '\\')
-
-        with open("folder_path.txt", "w") as f:
-            f.write(win_path)
-
-        jsx_script = "auto_process.jsx"
-        photoshop_exe = r"C:\Program Files\Adobe\Adobe Photoshop 2024\Photoshop.exe"  # Change path if needed
-        print("✅ Photoshop automation started.")
-        subprocess.run([
-            photoshop_exe,
-            jsx_script
-        ], check=True)
-        process_all(self.selected_path)
-        self.start_upload()
-
-    def start_upload(self):
-        result = self.show_alert_with_buttons("updt", "Automatic Upload")
-
-        if result == QMessageBox.StandardButton.Ok:
-            print("Użytkownik wybrał OK")
-            with open("folder_path.txt", "r") as f:
-                print(f.read())
-
-                upload_files(f.read())
-
-        elif result == QMessageBox.StandardButton.Cancel:
-            print("Użytkownik anulował")
-
-    def validate_selection(self):
-        selected = self.tree_view.selectedIndexes()
-        if not selected:
-            self.capture_button.setEnabled(False)
-            # self.select_button.setEnabled(False)
-            return
-        #
-        index = selected[0]
-        path = self.model.filePath(index)
-
-        is_valid = False
-        if os.path.isdir(path) and not self.capture_button.isEnabled():
-            has_subfolders = any(
-                os.path.isdir(os.path.join(path, item))
-                for item in os.listdir(path)
-            )
-            is_valid = not has_subfolders
-
-        self.capture_button.setEnabled(is_valid)
-
-    def on_item_double_clicked(self, index):
-        path = self.model.filePath(index)
-        if os.path.isfile(path):
-            try:
-                os.startfile(path)
-            except:
-                QMessageBox.information(self, "Info", f"Would open: {path}")
-
-    def refresh_view(self):
-        self.model.setRootPath(self.target_folder)
-        self.tree_view.setRootIndex(self.model.index(self.target_folder))
-        self.current_dir_label.setText(f"Current Directory: {self.target_folder}")
-
-    def clean_name(self, name, delete):
-        name_upper = name.upper()
-        for item in delete:
-            if item.upper() in name_upper:
-                name = name.replace(item, "")
-        return name.strip()
-
-    def openFileDialog(self):
-        file_dialog = QFileDialog(self)
-        file_dialog.setWindowTitle("Open Files")
-        file_dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
-        file_dialog.setViewMode(QFileDialog.ViewMode.Detail)
-
-        if file_dialog.exec():
-            selected_files = file_dialog.selectedFiles()
-            extracted_data = []
-            output_text = ""
-
-            for file_path in selected_files:
-                if file_path.lower().endswith('.csv'):
-                    try:
-                        with open(file_path, mode='r', newline='', encoding='utf-8') as file:
-                            reader = csv.DictReader(file, delimiter=',', quotechar='"')
-
-                            for row in reader:
-                                id = row.get("@id", "N/A")
-                                producer = row.get('/producer@name', "N/A")
-                                name = row.get('/description/name[pol]', 'N/A')
-                                status = row.get('/sizes/size/stock@stock_id', 'N/A')
-                                quantity = row.get('/sizes/size/stock@quantity', 'N/A')
-                                param = row.get('/parameters/parameter@textid[pol]', 'N/A')
-                                if "Å" in name:
-                                    name = name.replace("Å", "ł")
-                                if "Å¼" in name:
-                                    name = name.replace("Å¼", "ż")
-                                if "Ć³" in name:
-                                    name = name.replace("Ć³", "ó")
-                                if "Ä" in name:
-                                    name = name.replace("Ä", "ą")
-                                if "ozonowanie" in name.lower():
-                                    continue
-                                if "butów" in name.lower():
-                                    continue
-                                if "nakładk" in name.lower():
-                                    continue
-                                if "na buty" in name.lower():
-                                    continue
-                                if "kasków" in name.lower():
-                                    continue
-                                if "na kask" in name.lower():
-                                    continue
-                                if "ogrzewacz" in name.lower():
-                                    continue
-                                if "ozonowanie" in name.lower():
-                                    continue
-                                if "uchwyt" in name.lower():
-                                    continue
-                                if "but" in name.lower():
-                                    type = "but"
-                                if "kask" in name.lower():
-                                    type = "kask"
-
-                                if ", Wyprzedaż" in name:
-                                    name = name.split(", Wyprzedaż")[0]
-                                if ", Przecena" in name:
-                                    name = name.split(", Przecena")[0]
-
-                                if "ALPINESTARS" in name.upper():
-                                    # jebani idioci z alpinestars
-                                    delete = [" Buty motocyklowe wyścigowe",
-                                              " Motocyklowe Buty wyścigowe",
-                                              " Buty wyścigowe",
-                                              " Motocyklowe Buty turystyczne",
-                                              " Motocyklowe Buty sportowe",
-                                              " Buty motocyklowe",
-                                              " Buty motocyklowe",
-                                              " Buty turystyczne",
-                                              " Motocyklowe Buty",
-                                              " Buty codzienne",
-                                              " Buty sportowe",
-                                              "ALPINESTARS",
-                                              "Alpinestars",
-                                              "wyścigowe",
-                                              "sportowe",
-                                              "turystyczne",
-                                              "motocyklowe",
-                                              "Buty ",
-                                              "Buty",
-                                              "Buty  "]
-                                    name = self.clean_name(name, delete)
-                                if producer.lower() in name.lower():
-                                    name = name.lower().split(producer.lower())[1]
-
-                                if "3" in status or "1" in status:
-                                    status = status.split('\n')
-                                    quantity = quantity.split('\n')
-
-                                    for index, s in enumerate(status):
-                                        if s == "3" or s == "1":
-                                            if float(quantity[index]) > 0:
-                                                status = True
-                                                break
-                                            else:
-                                                status = False
-                                else:
-                                    status = ""
-                                output_text += f"{name}\t{status}\n"
-                                extracted_data.append([id, producer, name, quantity, status])
-
-                                if r"Prezentacja 360\tak" in param:
-                                    param = True
-                                else:
-                                    param = False
-
-                                if not param and status:
-                                    parent_directory = self.target_folder
-                                    directory_name = name
-                                    full_path = os.path.join(parent_directory, type, producer, directory_name)
-
-                                    json_path = os.path.join(full_path, "data.json")
-
-                                    data = {
-                                        "id": id,
-                                        "producer": producer,
-                                        "done": False
-                                    }
-
-                                    try:
-                                        os.makedirs(full_path, exist_ok=True)
-                                        print("?")
-                                        # os.mkdir(json_path)
-                                        os.makedirs(os.path.dirname(json_path), exist_ok=True)
-                                        with open(json_path, 'w') as f:
-                                            json.dump(data, f, indent=4)
-                                        print(
-                                            f"Directory '{directory_name}' created successfully at '{parent_directory}'.")
-                                    except FileExistsError:
-                                        print(f"Directory '{directory_name}' already exists at '{parent_directory}'.")
-                                    except PermissionError:
-                                        print(
-                                            f"Permission denied: Unable to create '{directory_name}' at '{parent_directory}'.")
-                                    except Exception as e:
-                                        print(f"An error occurred: {e}")
-
-
-
-                    except Exception as e:
-                        print(f"Error reading {file_path}: {e}\n")
-                else:
-                    print(f"{file_path} is not a CSV (.csv) file. Skipping.\n")
-
-            if extracted_data:
-                output_file = 'extracted_data.csv'
-                with open(output_file, mode='w', newline='', encoding='utf-8') as output:
-                    writer = csv.writer(output)
-                    writer.writerow(['ID', 'Producer', 'Product Name', "Stock", 'In Stock'])
-                    writer.writerows(extracted_data)
-
-                print(f"Data has been saved to '{output_file}'.\n")
-
-            self.text_edit.setText(output_text)
 
 def main():
-
     app = QApplication(sys.argv)
     window = FileDialogExample()
     window.show()
-    # keyboard.add_hotkey('f13', click_first)
-    # keyboard.add_hotkey('f14', click_second)
-
-
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
