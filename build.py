@@ -5,48 +5,82 @@ import shutil
 from pathlib import Path
 
 
-def build_application():
-    """Build the application using PyInstaller"""
-    print("Building 360 Photo Operator...")
+def clean_build():
+    """Clean previous build artifacts"""
+    build_dirs = ['build', 'dist', '__pycache__']
+    for dir_name in build_dirs:
+        if os.path.exists(dir_name):
+            shutil.rmtree(dir_name)
+            print(f"Cleaned {dir_name}")
 
-    # Check if PyInstaller is installed
-    try:
-        import PyInstaller
-    except ImportError:
-        print("Installing PyInstaller...")
-        subprocess.run([sys.executable, '-m', 'pip', 'install', 'pyinstaller'])
+    # Clean pycache in subdirectories
+    for root, dirs, files in os.walk('.'):
+        if '__pycache__' in root:
+            shutil.rmtree(root)
+            print(f"Cleaned {root}")
 
-    # Create build directory
-    build_dir = Path('build')
-    dist_dir = Path('dist')
 
-    # Clean previous builds
-    if build_dir.exists():
-        shutil.rmtree(build_dir)
-    if dist_dir.exists():
-        shutil.rmtree(dist_dir)
+def install_dependencies():
+    """Install required packages for building"""
+    packages = [
+        'pyinstaller==5.13.2',
+        'PyQt6==6.6.1',
+        'pyserial==3.5',
+        'selenium==4.15.2',
+        'webdriver-manager==4.0.1',
+        'requests==2.31.0',
+        'pillow==10.1.0'
+    ]
 
-    # Run PyInstaller
-    result = subprocess.run([
+    print("Installing build dependencies...")
+    for package in packages:
+        try:
+            subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+            print(f"✓ {package}")
+        except subprocess.CalledProcessError:
+            print(f"✗ Failed to install {package}")
+
+
+def build_executable():
+    """Build the executable using PyInstaller"""
+    print("Building executable...")
+
+    # Use direct PyInstaller command instead of spec file for simplicity
+    cmd = [
         sys.executable, '-m', 'PyInstaller',
-        'build.spec',
-        '--clean',
-        '--noconfirm'
-    ])
+        'main.py',
+        '--name=360PhotoOperator',
+        '--onefile',
+        '--console',
+        '--add-data=auto_process.jsx;.',
+        '--add-data=hardware_handler.py;.',
+        '--add-data=webp_handler.py;.',
+        '--add-data=uploader.py;.',
+        '--hidden-import=PyQt6.QtCore',
+        '--hidden-import=PyQt6.QtGui',
+        '--hidden-import=PyQt6.QtWidgets',
+        '--hidden-import=serial',
+        '--hidden-import=selenium',
+        '--hidden-import=webdriver_manager',
+        '--hidden-import=requests',
+        '--hidden-import=queue',
+        '--exclude-module=tkinter',
+        '--exclude-module=pymsgbox',
+        '--clean'
+    ]
 
-    if result.returncode == 0:
-        print("Build completed successfully!")
-        print(f"Executable location: {dist_dir / '360PhotoOperator'}")
-
-        # Create distribution package
-        create_distribution_package()
-    else:
-        print("Build failed!")
+    try:
+        result = subprocess.run(cmd, check=True)
+        if result.returncode == 0:
+            print("✓ Build completed successfully!")
+            return True
+    except subprocess.CalledProcessError as e:
+        print(f"✗ Build failed: {e}")
         return False
 
 
 def create_distribution_package():
-    """Create a zip file with the application and required files"""
+    """Create a distribution package with all required files"""
     print("Creating distribution package...")
 
     dist_dir = Path('dist')
@@ -57,38 +91,94 @@ def create_distribution_package():
         shutil.rmtree(package_dir)
     package_dir.mkdir()
 
-    # Copy files
-    files_to_copy = [
-        'installer.py',
+    # Copy the main executable
+    exe_source = dist_dir / '360PhotoOperator.exe'
+    if exe_source.exists():
+        shutil.copy2(exe_source, package_dir / '360PhotoOperator.exe')
+        print("✓ Copied executable")
+    else:
+        print("✗ Executable not found!")
+        return False
+
+    # Copy required support files
+    support_files = [
+        'auto_process.jsx',
         'README.txt',
         'LICENSE'
     ]
 
-    for file in files_to_copy:
+    for file in support_files:
         if Path(file).exists():
             shutil.copy2(file, package_dir / file)
+            print(f"✓ Copied {file}")
 
-    # Copy the built application
-    app_dir = package_dir / 'Application'
-    app_dir.mkdir()
-
-    if (dist_dir / '360PhotoOperator').exists():
-        for item in (dist_dir / '360PhotoOperator').iterdir():
-            if item.is_file():
-                shutil.copy2(item, app_dir / item.name)
+    # Create a simple installer script
+    create_installer_script(package_dir)
 
     # Create zip file
     import zipfile
-    with zipfile.ZipFile('360PhotoOperator_v1.0.0.zip', 'w', zipfile.ZIP_DEFLATED) as zipf:
+    zip_filename = '360PhotoOperator_v1.0.0.zip'
+    with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for file_path in package_dir.rglob('*'):
             if file_path.is_file():
                 arcname = file_path.relative_to(package_dir)
                 zipf.write(file_path, arcname)
 
+    print(f"✓ Created distribution package: {zip_filename}")
+
     # Clean up
     shutil.rmtree(package_dir)
 
-    print("Distribution package created: 360PhotoOperator_v1.0.0.zip")
+    return True
+
+
+def create_installer_script(package_dir):
+    """Create a simple installer script"""
+    installer_content = """@echo off
+chcp 65001 >nul
+title 360 Photo Operator Setup
+
+echo ==================================
+echo   360 Photo Operator Installation
+echo ==================================
+echo.
+
+:: Check if running as admin
+net session >nul 2>&1
+if %errorLevel% neq 0 (
+    echo This application requires Administrator privileges.
+    echo.
+    echo Please right-click and "Run as Administrator" or
+    echo press any key to exit and restart with admin rights.
+    pause >nul
+    exit /b 1
+)
+
+echo Administrator privileges confirmed.
+echo.
+echo This package contains a standalone executable.
+echo.
+echo To use the application:
+echo 1. Extract all files to a folder of your choice
+echo 2. Run 360PhotoOperator.exe as Administrator
+echo 3. Follow the on-screen setup instructions
+echo.
+echo Required system components:
+echo - Windows 10/11 64-bit
+echo - WSL 2 (will be installed automatically)
+echo - USB ports for camera and turntable
+echo.
+echo Press any key to open the extraction folder...
+pause >nul
+
+start "" "%CD%"
+
+exit /b 0
+"""
+
+    installer_file = package_dir / 'Installation_Instructions.bat'
+    with open(installer_file, 'w', encoding='utf-8') as f:
+        f.write(installer_content)
 
 
 def create_readme():
@@ -98,48 +188,79 @@ def create_readme():
 
 A professional application for automated 360-degree product photography.
 
-System Requirements:
+QUICK START:
+1. Run 360PhotoOperator.exe as Administrator
+2. The application will guide you through setup
+3. Connect your camera and turntable when prompted
+
+SYSTEM REQUIREMENTS:
 - Windows 10/11 64-bit
-- 8GB RAM minimum, 16GB recommended
+- 8GB RAM minimum
 - USB ports for camera and turntable
 - Internet connection for initial setup
 
-Supported Cameras:
-- Canon EOS series (tested with EOS RP)
-- Other cameras supported by gPhoto2
+SUPPORTED HARDWARE:
+- Canon EOS series cameras (tested with EOS RP)
+- Compatible turntables with serial control
 
-Installation:
-1. Run installer.py as Administrator
-2. Follow the on-screen instructions
-3. Restart your computer when prompted
-4. Run the application from the desktop shortcut
+FIRST TIME SETUP:
+The application will automatically:
+1. Install WSL 2 (if not present)
+2. Setup gPhoto2 for camera control
+3. Configure USB device sharing
 
-First Time Setup:
-1. Connect your DSLR camera via USB
-2. Connect your turntable to COM port
-3. Set camera to Manual mode and Manual focus
-4. Disable auto power-off on camera
+MANUAL SETUP (if automatic fails):
+1. Install WSL 2: Open PowerShell as Admin and run: wsl --install
+2. Install USBIPD: Download from GitHub releases
+3. Run the application as Administrator
 
-Usage:
-1. Enter product name in the text field
-2. Click "Connect" for both Table360 and Camera
-3. Click "Start Capture" to begin the process
-4. The application will automatically capture, process, and upload photos
+TROUBLESHOOTING:
+- Always run as Administrator
+- Ensure camera is in Manual mode
+- Check USB connections
+- Restart application if devices aren't detected
 
-Troubleshooting:
-- Ensure WSL 2 is installed and running
-- Run application as Administrator for USB access
-- Check camera connection in Device Manager
-- Verify COM port settings for turntable
+SUPPORT:
+Contact your system administrator for technical support.
 
-Support:
-For technical support, please contact your system administrator.
+Version 1.0.0
 """
 
     with open('README.txt', 'w', encoding='utf-8') as f:
         f.write(readme_content)
 
 
-if __name__ == "__main__":
+def main():
+    """Main build process"""
+    print("360 Photo Operator - Build System")
+    print("=" * 40)
+
+    # Create README
     create_readme()
-    build_application()
+    print("✓ Created README.txt")
+
+    # Clean previous builds
+    clean_build()
+
+    # Install dependencies
+    install_dependencies()
+
+    # Build executable
+    if build_executable():
+        # Create distribution package
+        if create_distribution_package():
+            print("\n" + "=" * 40)
+            print("BUILD COMPLETED SUCCESSFULLY!")
+            print("Distribution package: 360PhotoOperator_v1.0.0.zip")
+            print("\nThe package contains:")
+            print("- 360PhotoOperator.exe (standalone executable)")
+            print("- auto_process.jsx (Photoshop automation)")
+            print("- Installation instructions")
+        else:
+            print("\nFailed to create distribution package!")
+    else:
+        print("\nBuild failed!")
+
+
+if __name__ == "__main__":
+    main()
