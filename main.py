@@ -1,3 +1,4 @@
+import ctypes
 import json
 import subprocess
 import sys
@@ -77,28 +78,52 @@ class FileDialogExample(QMainWindow):
                 label.setStyleSheet('color: #606060; font-weight: 700;')
 
     def init_wsl_environment(self):
-        """Initialize WSL environment in background thread"""
+        """Initialize WSL 2 environment and ensure a distribution is running"""
 
         def setup_wsl():
             try:
-                # Check if WSL is available
-                result = subprocess.run(['wsl', 'echo', 'WSL ready'],
-                                        capture_output=True, text=True, timeout=10)
+                # Check if any WSL 2 distribution is running
+                result = subprocess.run(
+                    ['wsl', '--list', '--verbose'],
+                    capture_output=True, text=True, timeout=10
+                )
+
                 if result.returncode == 0:
-                    print("WSL is already running")
-                    return
-            except:
-                print("WSL not immediately available")
+                    # Check if any distribution is running
+                    lines = result.stdout.split('\n')
+                    distribution_running = False
+                    default_distro = None
 
-            try:
-                # Start WSL
-                subprocess.Popen(['wsl'],
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
-                time.sleep(3)
-                print("WSL started")
+                    for line in lines:
+                        if 'Running' in line:
+                            distribution_running = True
+                            print("WSL 2 distribution is already running")
+                            break
+                        if 'Default' in line and not default_distro:
+                            # Extract default distribution name
+                            parts = line.split()
+                            if len(parts) > 0:
+                                default_distro = parts[0]
 
-                # Check if gphoto2 is installed
+                    if not distribution_running:
+                        # Start the default distribution
+                        if default_distro:
+                            print(f"Starting WSL 2 distribution: {default_distro}")
+                            subprocess.run(
+                                ['wsl', '-d', default_distro, 'echo', 'WSL started'],
+                                timeout=10
+                            )
+                        else:
+                            # Try to start Ubuntu (most common)
+                            print("Starting Ubuntu distribution")
+                            subprocess.run(
+                                ['wsl', '-d', 'Ubuntu', 'echo', 'WSL started'],
+                                timeout=10
+                            )
+
+                        time.sleep(3)
+
+                # Check if gPhoto2 is installed
                 install_check = subprocess.run(
                     ['wsl', 'which', 'gphoto2'],
                     capture_output=True, text=True, timeout=10
@@ -118,9 +143,125 @@ class FileDialogExample(QMainWindow):
 
             except Exception as e:
                 print(f"Failed to initialize WSL: {e}")
+                # Try alternative approach
+                self.setup_wsl_alternative()
 
         thread = threading.Thread(target=setup_wsl, daemon=True)
         thread.start()
+
+    def setup_wsl_alternative(self):
+        """Alternative method to setup WSL if the first one fails"""
+        try:
+            # Start WSL with a simple command to ensure it's running
+            subprocess.run(['wsl', 'echo', 'WSL initializing...'], timeout=10)
+
+            # Install gPhoto2 if needed
+            subprocess.run(
+                ['wsl', 'sudo', 'apt-get', 'update', '-y'],
+                capture_output=True, timeout=120
+            )
+            subprocess.run(
+                ['wsl', 'sudo', 'apt-get', 'install', '-y', 'gphoto2'],
+                capture_output=True, timeout=180
+            )
+
+            print("WSL setup completed via alternative method")
+        except Exception as e:
+            print(f"Alternative WSL setup also failed: {e}")
+            self.show_wsl_help_message()
+
+    def show_wsl_help_message(self):
+        """Show help message for WSL setup"""
+        message = """
+    WSL 2 Setup Required
+
+    To use this application, you need to have a WSL 2 distribution running.
+
+    Please follow these steps:
+
+    1. Open Windows Terminal or Command Prompt as Administrator
+    2. Run: wsl --install
+       (This will install Ubuntu by default)
+    3. Wait for the installation to complete and set up a username/password
+    4. Restart this application
+
+    If you already have WSL installed but it's not running, try:
+    1. Open Windows Terminal
+    2. Type 'wsl' and press Enter to start the default distribution
+    3. Then run this application again
+
+    Alternatively, you can manually start WSL with:
+    wsl -d Ubuntu
+    """
+        QMessageBox.warning(self, "WSL Setup Required", message)
+
+    def bind_usb_device(self, busid):
+        """Bind USB device for sharing with WSL (requires admin privileges)"""
+        try:
+            # Try to bind the USB device
+            result = subprocess.run(
+                ["powershell", "-Command", f"usbipd bind --busid={busid}"],
+                capture_output=True, text=True, timeout=10
+            )
+
+            if result.returncode == 0:
+                print(f"USB device {busid} bound successfully")
+                return True
+            else:
+                print(f"Failed to bind USB device: {result.stderr}")
+
+                # If binding fails due to admin rights, try with runas
+                if "access denied" in result.stderr.lower() or "administrator" in result.stderr.lower():
+                    print("Attempting to bind with administrator privileges...")
+                    return self.bind_usb_device_as_admin(busid)
+                return False
+
+        except Exception as e:
+            print(f"USB binding error: {e}")
+            return False
+
+    def bind_usb_device_as_admin(self, busid):
+        """Attempt to bind USB device with administrator privileges"""
+        try:
+            # Create a PowerShell script to run as admin
+            ps_script = f"""
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "usbipd"
+            $psi.Arguments = "bind --busid={busid}"
+            $psi.Verb = "runas"
+            $psi.WindowStyle = "Hidden"
+            $process = [System.Diagnostics.Process]::Start($psi)
+            $process.WaitForExit()
+            exit $process.ExitCode
+            """
+
+            # Save the script to a temporary file
+            script_path = os.path.join(os.getenv('TEMP'), 'bind_usb.ps1')
+            with open(script_path, 'w') as f:
+                f.write(ps_script)
+
+            # Execute the script
+            result = subprocess.run(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-File", script_path],
+                capture_output=True, text=True, timeout=15
+            )
+
+            # Clean up the script
+            try:
+                os.remove(script_path)
+            except:
+                pass
+
+            if result.returncode == 0:
+                print(f"USB device {busid} bound with admin privileges")
+                return True
+            else:
+                print(f"Admin binding failed: {result.stderr}")
+                return False
+
+        except Exception as e:
+            print(f"Admin binding error: {e}")
+            return False
 
     def detect_camera_busid(self):
         """Detect the camera's USB bus ID using usbipd"""
@@ -163,13 +304,24 @@ class FileDialogExample(QMainWindow):
             return None
 
     def attach_usb_to_wsl(self, busid=None):
-        """Attach USB device to WSL"""
+        """Attach USB device to WSL with automatic binding"""
         if busid is None:
             # Try to detect camera bus ID
             busid = self.detect_camera_busid()
             if busid is None:
                 print("Could not detect camera bus ID")
                 return False
+
+        # First, check if device is already bound
+        state = self.get_usb_device_state(busid)
+        if state == "not shared":
+            print(f"Device {busid} is not shared. Attempting to bind...")
+            if not self.bind_usb_device(busid):
+                # If automatic binding fails, show user instructions
+                self.show_bind_instructions(busid)
+                return False
+            # Wait a moment after binding
+            time.sleep(2)
 
         try:
             # Detach first if already attached
@@ -187,7 +339,7 @@ class FileDialogExample(QMainWindow):
 
             if result.returncode == 0:
                 print(f"USB device {busid} attached to WSL")
-                self.camera_busid = busid  # Store the successful bus ID
+                self.camera_busid = busid
                 return True
             else:
                 print(f"Failed to attach USB: {result.stderr}")
@@ -196,6 +348,45 @@ class FileDialogExample(QMainWindow):
         except Exception as e:
             print(f"USB attachment error: {e}")
             return False
+
+    def get_usb_device_state(self, busid):
+        """Check if USB device is shared"""
+        try:
+            result = subprocess.run(
+                ["powershell", "-Command", "usbipd list"],
+                capture_output=True, text=True, timeout=10
+            )
+
+            if result.returncode == 0:
+                # Parse the output to find the device state
+                for line in result.stdout.split('\n'):
+                    if busid in line:
+                        if "not shared" in line.lower():
+                            return "not shared"
+                        elif "shared" in line.lower():
+                            return "shared"
+                return "not found"
+            return "error"
+        except Exception as e:
+            print(f"Error checking USB state: {e}")
+            return "error"
+
+    def show_bind_instructions(self, busid):
+        """Show instructions for manual USB binding"""
+        message = f"""
+    USB Device Needs to be Shared Manually
+
+    The camera at bus ID {busid} is not shared with WSL.
+
+    To fix this, please run the following command as Administrator:
+
+    1. Press Win + X and select "Windows Terminal (Admin)" or "Command Prompt (Admin)"
+    2. Run this command: usbipd bind --busid={busid}
+    3. Then try connecting the camera again in this application.
+
+    Alternatively, you can run this application as Administrator.
+    """
+        QMessageBox.warning(self, "USB Sharing Required", message)
 
     def check_camera_connection(self):
         """Check if camera is connected via gPhoto2"""
@@ -225,7 +416,7 @@ class FileDialogExample(QMainWindow):
         from PyQt6.QtCore import Qt, QTimer
         from PyQt6.QtGui import QFont
 
-        self.setWindowTitle("Pastel App")
+        self.setWindowTitle("360 Operator")
         self.resize(400, 300)
 
         # Create central widget
@@ -414,21 +605,21 @@ class FileDialogExample(QMainWindow):
         elif device == 'Camera':
             if self.device_states[device] == 'Not connected':
                 # Try to attach USB and check camera
-                attached = self.attach_usb_to_wsl()
+                attached = self.attach_usb_to_wsl()  # This now includes binding
                 if attached:
-                    # Give it more time to initialize for Canon
+                    # Give it time to initialize
                     time.sleep(4)
                     connected = self.check_camera_connection()
+
                     if connected:
-                        # Try to prepare camera, but don't fail if it doesn't work
+                        # Try to prepare camera
                         preparation_success = self.hardware_manager.prepare_canon_camera()
-                        if preparation_success:
-                            new_state = 'Connected'
-                        else:
-                            new_state = 'Connected'  # Still connected even if preparation failed
+                        new_state = 'Connected'
+                        if not preparation_success:
                             print("Camera connected but some settings couldn't be configured")
                     else:
                         new_state = 'Error'
+
                     self.device_states[device] = new_state
                     self.update_status_label(self.camera_label, new_state)
                 else:
@@ -436,6 +627,7 @@ class FileDialogExample(QMainWindow):
                     self.device_states[device] = new_state
                     self.update_status_label(self.camera_label, new_state)
             else:
+                # Disconnect camera
                 if self.camera_busid:
                     try:
                         subprocess.run(["powershell", "-Command", f"usbipd detach --busid={self.camera_busid}"],
@@ -445,9 +637,6 @@ class FileDialogExample(QMainWindow):
                 self.device_states[device] = 'Not connected'
                 self.update_status_label(self.camera_label, 'Not connected')
                 self.camera_busid = None
-
-        # Update start button state
-        self.toggle_start_button()
 
     def update_status_label(self, label: QLabel, state: str):
         title = label.property('device_title') or label.text().split(':')[0]
@@ -723,6 +912,28 @@ class FileDialogExample(QMainWindow):
 
 
 def main():
+    def is_admin():
+        """Check if the application is running with administrator privileges"""
+        try:
+            return ctypes.windll.shell32.IsUserAnAdmin()
+        except:
+            return False
+
+    def main():
+        # Request admin privileges if not already running as admin
+        if not is_admin():
+            try:
+                # Re-run the program with admin rights
+                ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+                sys.exit(0)
+            except Exception as e:
+                print(f"Failed to elevate privileges: {e}")
+                # Continue without admin rights (user will see instructions if needed)
+
+        app = QApplication(sys.argv)
+        window = FileDialogExample()
+        window.show()
+        sys.exit(app.exec())
     app = QApplication(sys.argv)
     window = FileDialogExample()
     window.show()
